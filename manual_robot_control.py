@@ -71,12 +71,14 @@ PROBE_BIAS_RATE_HZ = 100
 W1_START_XY = (0.50,  0.20)
 W2_START_XY = (0.60,  0.20)
 W_PROBE_DIR = (0.0, -1.0)     # اتجاه اللمس: -Y (نحو اللوحة)
+W_PROBE_YAW = np.pi / 2.0     # دوران الجريبر 90° => الاصبعان عموديان على اتجاه اللمس
 
 # الحافة الجنوبية (خلف الصف 1) — الجريبر ينطلق منها باتجاه +X ليلمس اللوحة
 # (الحافة ممتدة في اتجاه Y، لذا نقطتا البدء نفس x مع y مختلف)
 S1_START_XY = (0.30, -0.20)
 S2_START_XY = (0.30, -0.30)
 S_PROBE_DIR = (+1.0, 0.0)     # اتجاه اللمس: +X (نحو اللوحة)
+S_PROBE_YAW = 0.0             # بدون دوران => الاصبعان عموديان على اتجاه اللمس
 
 CALIB_FILE = os.path.expanduser("~/board_calibration.yaml")
 
@@ -377,10 +379,10 @@ def calibrate_board(arm, force_monitor):
     global board_corner, board_theta, e_h_axis, e_N_axis
 
     probes = [
-        ("W1 (west edge, x=0.5)", W1_START_XY, W_PROBE_DIR),
-        ("W2 (west edge, x=0.6)", W2_START_XY, W_PROBE_DIR),
-        ("S1 (south edge, x=0.3)", S1_START_XY, S_PROBE_DIR),
-        ("S2 (south edge, x=0.4)", S2_START_XY, S_PROBE_DIR),
+        ("W1 (west edge, x=0.5)", W1_START_XY, W_PROBE_DIR, W_PROBE_YAW),
+        ("W2 (west edge, x=0.6)", W2_START_XY, W_PROBE_DIR, W_PROBE_YAW),
+        ("S1 (south edge, x=0.3)", S1_START_XY, S_PROBE_DIR, S_PROBE_YAW),
+        ("S2 (south edge, x=0.4)", S2_START_XY, S_PROBE_DIR, S_PROBE_YAW),
     ]
 
     rospy.loginfo("="*62)
@@ -391,9 +393,9 @@ def calibrate_board(arm, force_monitor):
     rospy.loginfo(f"  probe speed      : {PROBE_SPEED_SCALE*100:.0f}% of max")
     rospy.loginfo(f"  force threshold  : {PROBE_FORCE_THRESH:.1f} N")
     rospy.loginfo(f"  max travel       : {PROBE_MAX_TRAVEL*1000:.0f} mm")
-    for name, xy, d in probes:
+    for name, xy, d, yaw in probes:
         rospy.loginfo(f"  {name}: start=({xy[0]:+.3f},{xy[1]:+.3f}) "
-                      f"dir=({d[0]:+.1f},{d[1]:+.1f})")
+                      f"dir=({d[0]:+.1f},{d[1]:+.1f}) yaw={np.degrees(yaw):+.0f}deg")
     rospy.loginfo("="*62)
 
     ans = input("Make sure the workspace is CLEAR. Proceed? [y/N]: ").strip().lower()
@@ -402,24 +404,24 @@ def calibrate_board(arm, force_monitor):
         return False
 
     contacts = []
-    for name, start_xy, direction in probes:
+    for name, start_xy, direction, probe_yaw in probes:
         rospy.loginfo(f"\n[Probe] {name}")
 
         # 1) ارتفاع الى ارتفاع الانتقال اولاً (امان)
         cur = arm.get_current_pose().pose
         move_to_pose(arm, cur.position.x, cur.position.y, PROBE_TRANSIT_Z,
-                     v_slow, a_slow, yaw=0.0)
+                     v_slow, a_slow, yaw=probe_yaw)
 
         # 2) انتقل افقياً لنقطة البدء على ارتفاع الانتقال
         rospy.loginfo(f"  move -> start ({start_xy[0]:+.4f}, {start_xy[1]:+.4f}) "
-                      f"@ Z={PROBE_TRANSIT_Z:.3f}")
+                      f"@ Z={PROBE_TRANSIT_Z:.3f} yaw={np.degrees(probe_yaw):+.0f}deg")
         move_to_pose(arm, start_xy[0], start_xy[1], PROBE_TRANSIT_Z,
-                     v_slow, a_slow, yaw=0.0)
+                     v_slow, a_slow, yaw=probe_yaw)
 
         # 3) انزل الى ارتفاع الـprobe
         rospy.loginfo(f"  descend -> Z={PROBE_Z:.3f}")
         move_to_pose(arm, start_xy[0], start_xy[1], PROBE_Z,
-                     v_slow, a_slow, yaw=0.0)
+                     v_slow, a_slow, yaw=probe_yaw)
 
         # 4) نفّذ الـprobe
         contact = probe_linear(arm, force_monitor, direction,
@@ -430,7 +432,7 @@ def calibrate_board(arm, force_monitor):
             # محاولة رفع امن قبل الخروج
             cur = arm.get_current_pose().pose
             move_to_pose(arm, cur.position.x, cur.position.y, PROBE_TRANSIT_Z,
-                         v_slow, a_slow, yaw=0.0)
+                         v_slow, a_slow, yaw=probe_yaw)
             return False
         rospy.loginfo(f"  contact @ ({contact[0]:+.4f}, {contact[1]:+.4f})")
         contacts.append(contact)
@@ -441,16 +443,16 @@ def calibrate_board(arm, force_monitor):
         back_xy = contact - d_norm * PROBE_RETREAT
         rospy.loginfo(f"  retreat -> ({back_xy[0]:+.4f}, {back_xy[1]:+.4f})")
         move_to_pose(arm, back_xy[0], back_xy[1], PROBE_Z,
-                     v_slow, a_slow, yaw=0.0)
+                     v_slow, a_slow, yaw=probe_yaw)
 
         # 6) رفع 1cm عن ارتفاع الـprobe
         lift_z = PROBE_Z + PROBE_POST_LIFT
         move_to_pose(arm, back_xy[0], back_xy[1], lift_z,
-                     v_slow, a_slow, yaw=0.0)
+                     v_slow, a_slow, yaw=probe_yaw)
 
         # 7) رفع الى ارتفاع الانتقال (استعداد للنقطة التالية)
         move_to_pose(arm, back_xy[0], back_xy[1], PROBE_TRANSIT_Z,
-                     v_slow, a_slow, yaw=0.0)
+                     v_slow, a_slow, yaw=probe_yaw)
 
     W1, W2, S1, S2 = contacts
 
