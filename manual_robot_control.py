@@ -59,7 +59,8 @@ PROBE_Z            = 0.06     # ارتفاع اللمس (معلوم مسبقاً
 PROBE_SPEED_SCALE  = 0.02     # 2% من السرعة القصوى — بطيء جدا لحماية اللوحة
 PROBE_ACCEL_SCALE  = 0.02
 PROBE_MAX_TRAVEL   = 0.200    # اقصى مسافة تحرك قبل الاستسلام (200mm كافٍ للوصول)
-PROBE_POST_LIFT    = 0.010    # 10mm رفع فور التلامس (قبل الانتقال للنقطة التالية)
+PROBE_RETREAT      = 0.020    # 20mm تراجع افقي فور التلامس (عكس اتجاه الـprobe)
+PROBE_POST_LIFT    = 0.010    # 10mm رفع بعد التراجع (قبل الانتقال للنقطة التالية)
 PROBE_TRANSIT_Z    = safe_h + 0.080  # ارتفاع الانتقال بين النقاط (8cm فوق الآمن)
 PROBE_FORCE_THRESH = 5.0      # نيوتن (|F_xy|) — عتبة كشف التلامس
 PROBE_BIAS_SAMPLES = 50       # عدد عينات لحساب bias القوة
@@ -434,13 +435,21 @@ def calibrate_board(arm, force_monitor):
         rospy.loginfo(f"  contact @ ({contact[0]:+.4f}, {contact[1]:+.4f})")
         contacts.append(contact)
 
-        # 5) رفع فوري 1cm (يمنع اي احتكاك اثناء الانتقال)
-        lift_z = PROBE_Z + PROBE_POST_LIFT
-        move_to_pose(arm, contact[0], contact[1], lift_z,
+        # 5) تراجع افقي بعكس اتجاه الـprobe (قبل الرفع)
+        d_norm = np.asarray(direction, dtype=float)
+        d_norm = d_norm / np.linalg.norm(d_norm)
+        back_xy = contact - d_norm * PROBE_RETREAT
+        rospy.loginfo(f"  retreat -> ({back_xy[0]:+.4f}, {back_xy[1]:+.4f})")
+        move_to_pose(arm, back_xy[0], back_xy[1], PROBE_Z,
                      v_slow, a_slow, yaw=0.0)
 
-        # 6) رفع الى ارتفاع الانتقال (استعداد للنقطة التالية)
-        move_to_pose(arm, contact[0], contact[1], PROBE_TRANSIT_Z,
+        # 6) رفع 1cm عن ارتفاع الـprobe
+        lift_z = PROBE_Z + PROBE_POST_LIFT
+        move_to_pose(arm, back_xy[0], back_xy[1], lift_z,
+                     v_slow, a_slow, yaw=0.0)
+
+        # 7) رفع الى ارتفاع الانتقال (استعداد للنقطة التالية)
+        move_to_pose(arm, back_xy[0], back_xy[1], PROBE_TRANSIT_Z,
                      v_slow, a_slow, yaw=0.0)
 
     W1, W2, S1, S2 = contacts
