@@ -66,12 +66,13 @@ PROBE_FORCE_THRESH = 5.0      # نيوتن (|F_xy|) — عتبة كشف التل
 PROBE_BIAS_SAMPLES = 50       # عدد عينات لحساب bias القوة
 PROBE_BIAS_RATE_HZ = 100
 
-# --- تصحيح ازاحة نقطة التلامس ---
-# الـTCP في منتصف الجريبر، لكن الوجه الخارجي للإصبع هو اللي يلامس الحافة.
-# المسافة من TCP الى الوجه الخارجي للإصبع تقريباً:
-#   CLOSE_WIDTH/2 + finger_thickness/2 = 0.0125 + ~0.011 = ~0.0235 m
-# يُضاف في اتجاه اللمس للحصول على موقع الحافة الحقيقي.
-GRIPPER_CONTACT_OFFSET = 0.0235
+# --- هندسة الجريبر (Franka Panda default fingers) ---
+# GRIPPER_HALF_WIDTH = المسافة من مركز الجريبر (TCP) الى الوجه الخارجي للإصبع.
+# تُستخدم لتصحيح نقطة التلامس:
+#   الحافة الحقيقية للوحة = TCP_contact + probe_direction * GRIPPER_HALF_WIDTH
+# القيمة = نصف CLOSE_WIDTH (المسافة بين وجهي الاصبعين الداخليين) + سمك الاصبع.
+FINGER_THICKNESS   = 0.011                                       # سمك الاصبع (Panda default ~11mm)
+GRIPPER_HALF_WIDTH = CLOSE_WIDTH / 2.0 + FINGER_THICKNESS        # = 0.0235m
 
 # --- نقاط بدء الـprobing (يدخلها المستخدم، اطار الروبوت العالمي) ---
 # الحافة الغربية (يسار اللوحة) — الجريبر ينطلق منها باتجاه -Y ليلمس اللوحة
@@ -437,11 +438,11 @@ def calibrate_board(arm, force_monitor):
             return False
         rospy.loginfo(f"  contact @ ({contact[0]:+.4f}, {contact[1]:+.4f})")
 
-        # تصحيح ازاحة الجريبر: الحافة الحقيقية = TCP + اتجاه_اللمس * offset
+        # تصحيح ازاحة الجريبر: الحافة الحقيقية = TCP + اتجاه_اللمس * GRIPPER_HALF_WIDTH
         d_unit = np.asarray(direction, dtype=float)
         d_unit = d_unit / np.linalg.norm(d_unit)
-        edge_xy = contact + d_unit * GRIPPER_CONTACT_OFFSET
-        rospy.loginfo(f"  edge    @ ({edge_xy[0]:+.4f}, {edge_xy[1]:+.4f}) (offset={GRIPPER_CONTACT_OFFSET*1000:.1f}mm)")
+        edge_xy = contact + d_unit * GRIPPER_HALF_WIDTH
+        rospy.loginfo("  edge    @ ({:+.4f}, {:+.4f}) (half_width={:.1f}mm)".format(edge_xy[0], edge_xy[1], GRIPPER_HALF_WIDTH*1000))
         contacts.append(edge_xy)
 
         # 5) تراجع افقي بعكس اتجاه الـprobe (قبل الرفع)
