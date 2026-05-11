@@ -231,9 +231,7 @@ class ForceMonitor:
                 samples.append(self._force_xyz.copy())
             rate.sleep()
         self._bias_xyz = np.mean(samples, axis=0)
-        rospy.loginfo(f"  [ForceMonitor] bias = "
-                      f"({self._bias_xyz[0]:+.2f}, {self._bias_xyz[1]:+.2f}, "
-                      f"{self._bias_xyz[2]:+.2f}) N")
+        rospy.loginfo("  [ForceMonitor] bias = ({:+.2f}, {:+.2f}, {:+.2f}) N".format(self._bias_xyz[0], self._bias_xyz[1], self._bias_xyz[2]))
 
     def get_xy_magnitude(self):
         with self._lock:
@@ -326,8 +324,7 @@ def probe_linear(move_group, force_monitor, direction_xy,
     rospy.loginfo("  [probe] zeroing force bias ...")
     force_monitor.zero_bias()
 
-    rospy.loginfo(f"  [probe] moving: dir=({d[0]:+.2f},{d[1]:+.2f}), "
-                  f"max={max_travel*1000:.0f}mm, thresh={force_threshold:.1f}N")
+    rospy.loginfo("  [probe] moving: dir=({:+.2f},{:+.2f}), max={:.0f}mm, thresh={:.1f}N".format(d[0], d[1], max_travel*1000, force_threshold))
     move_group.execute(plan, wait=False)
 
     rate = rospy.Rate(200)
@@ -394,8 +391,7 @@ def calibrate_board(arm, force_monitor):
     rospy.loginfo(f"  force threshold  : {PROBE_FORCE_THRESH:.1f} N")
     rospy.loginfo(f"  max travel       : {PROBE_MAX_TRAVEL*1000:.0f} mm")
     for name, xy, d, yaw in probes:
-        rospy.loginfo(f"  {name}: start=({xy[0]:+.3f},{xy[1]:+.3f}) "
-                      f"dir=({d[0]:+.1f},{d[1]:+.1f}) yaw={np.degrees(yaw):+.0f}deg")
+        rospy.loginfo("  {}: start=({:+.3f},{:+.3f}) dir=({:+.1f},{:+.1f}) yaw={:+.0f}deg".format(name, xy[0], xy[1], d[0], d[1], np.degrees(yaw)))
     rospy.loginfo("="*62)
 
     ans = input("Make sure the workspace is CLEAR. Proceed? [y/N]: ").strip().lower()
@@ -413,8 +409,7 @@ def calibrate_board(arm, force_monitor):
                      v_slow, a_slow, yaw=probe_yaw)
 
         # 2) انتقل افقياً لنقطة البدء على ارتفاع الانتقال
-        rospy.loginfo(f"  move -> start ({start_xy[0]:+.4f}, {start_xy[1]:+.4f}) "
-                      f"@ Z={PROBE_TRANSIT_Z:.3f} yaw={np.degrees(probe_yaw):+.0f}deg")
+        rospy.loginfo("  move -> start ({:+.4f}, {:+.4f}) @ Z={:.3f} yaw={:+.0f}deg".format(start_xy[0], start_xy[1], PROBE_TRANSIT_Z, np.degrees(probe_yaw)))
         move_to_pose(arm, start_xy[0], start_xy[1], PROBE_TRANSIT_Z,
                      v_slow, a_slow, yaw=probe_yaw)
 
@@ -427,8 +422,7 @@ def calibrate_board(arm, force_monitor):
         contact = probe_linear(arm, force_monitor, direction,
                                max_travel=PROBE_MAX_TRAVEL)
         if contact is None:
-            rospy.logerr(f"{name}: no contact detected within {PROBE_MAX_TRAVEL*1000:.0f}mm. "
-                         "Aborting calibration.")
+            rospy.logerr("{}: no contact detected within {:.0f}mm. Aborting calibration.".format(name, PROBE_MAX_TRAVEL*1000))
             # محاولة رفع امن قبل الخروج
             cur = arm.get_current_pose().pose
             move_to_pose(arm, cur.position.x, cur.position.y, PROBE_TRANSIT_Z,
@@ -502,13 +496,10 @@ def calibrate_board(arm, force_monitor):
 
     rospy.loginfo("="*62)
     rospy.loginfo("Calibration complete.")
-    rospy.loginfo(f"  corner (outer, near a1) = "
-                  f"({corner_meas[0]:+.4f}, {corner_meas[1]:+.4f}) m")
-    rospy.loginfo(f"  theta                   = {np.degrees(theta_meas):+.3f} deg")
-    rospy.loginfo(f"  e_h                     = "
-                  f"({eh_avg[0]:+.5f}, {eh_avg[1]:+.5f})")
-    rospy.loginfo(f"  e_N                     = "
-                  f"({eN_fix[0]:+.5f}, {eN_fix[1]:+.5f})")
+    rospy.loginfo("  corner (outer, near a1) = ({:+.4f}, {:+.4f}) m".format(corner_meas[0], corner_meas[1]))
+    rospy.loginfo("  theta                   = {:+.3f} deg".format(np.degrees(theta_meas)))
+    rospy.loginfo("  e_h                     = ({:+.5f}, {:+.5f})".format(eh_avg[0], eh_avg[1]))
+    rospy.loginfo("  e_N                     = ({:+.5f}, {:+.5f})".format(eN_fix[0], eN_fix[1]))
     rospy.loginfo("="*62)
 
     # اعادة بناء المواقع + مركز الجريبر
@@ -551,27 +542,19 @@ def load_calibration(path=CALIB_FILE):
     e_N_axis     = np.array([data['e_N_x'], data['e_N_y']])
     build_positions(board_corner, e_h_axis, e_N_axis)
     rospy.loginfo(f"Calibration loaded <- {path}")
-    rospy.loginfo(f"  corner=({board_corner[0]:+.4f}, {board_corner[1]:+.4f}), "
-                  f"theta={np.degrees(board_theta):+.3f} deg")
+    rospy.loginfo("  corner=({:+.4f}, {:+.4f}), theta={:+.3f} deg".format(board_corner[0], board_corner[1], np.degrees(board_theta)))
     return True
 
 
 def show_calibration():
     print("\n--- Current calibration ---")
-    print(f"  corner (outer near a1): "
-          f"({board_corner[0]:+.4f}, {board_corner[1]:+.4f}) m")
-    print(f"  theta (board yaw)     : "
-          f"{np.degrees(board_theta):+.3f} deg  ({board_theta:+.5f} rad)")
-    print(f"  e_h (a -> h)          : "
-          f"({e_h_axis[0]:+.5f}, {e_h_axis[1]:+.5f})")
-    print(f"  e_N (row1 -> row8)    : "
-          f"({e_N_axis[0]:+.5f}, {e_N_axis[1]:+.5f})")
-    print(f"  a1 center             : "
-          f"({square_positions['a1'][0]:+.4f}, {square_positions['a1'][1]:+.4f})")
-    print(f"  h8 center             : "
-          f"({square_positions['h8'][0]:+.4f}, {square_positions['h8'][1]:+.4f})")
-    print(f"  home                  : "
-          f"({hx:+.4f}, {hy:+.4f}, {hz:+.4f})")
+    print("  corner (outer near a1): ({:+.4f}, {:+.4f}) m".format(board_corner[0], board_corner[1]))
+    print("  theta (board yaw)     : {:+.3f} deg  ({:+.5f} rad)".format(np.degrees(board_theta), board_theta))
+    print("  e_h (a -> h)          : ({:+.5f}, {:+.5f})".format(e_h_axis[0], e_h_axis[1]))
+    print("  e_N (row1 -> row8)    : ({:+.5f}, {:+.5f})".format(e_N_axis[0], e_N_axis[1]))
+    print("  a1 center             : ({:+.4f}, {:+.4f})".format(square_positions['a1'][0], square_positions['a1'][1]))
+    print("  h8 center             : ({:+.4f}, {:+.4f})".format(square_positions['h8'][0], square_positions['h8'][1]))
+    print("  home                  : ({:+.4f}, {:+.4f}, {:+.4f})".format(hx, hy, hz))
 
 
 def test_calibration(arm):
@@ -642,8 +625,7 @@ def manual_control():
             arm.set_named_target('ready'); arm.go(wait=True); continue
 
         if cmd == 'home':
-            rospy.loginfo(f"Moving to custom Home: ({hx:.3f}, {hy:.3f}, {hz:.3f}), "
-                          f"yaw={np.degrees(board_theta):+.2f}deg")
+            rospy.loginfo("Moving to custom Home: ({:.3f}, {:.3f}, {:.3f}), yaw={:+.2f}deg".format(hx, hy, hz, np.degrees(board_theta)))
             move_to_pose(arm, hx, hy, hz, v_slow, a_slow)
             continue
 
