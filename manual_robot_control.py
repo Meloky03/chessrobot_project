@@ -55,16 +55,26 @@ PLAY_AREA_SIZE   = 0.360                                   # 360mm (8x8 * 45mm)
 MARGIN           = (BOARD_OUTER_SIZE - PLAY_AREA_SIZE)/2.0 # 0.030m بين المربعات والاطار
 
 # --- اعدادات الـprobing (المعايرة) ---
-PROBE_Z            = safe_h   # ارتفاع اللمس (معلوم مسبقاً — لا نخاطر به)
+PROBE_Z            = 0.06     # ارتفاع اللمس (معلوم مسبقاً — لا نخاطر به)
 PROBE_SPEED_SCALE  = 0.02     # 2% من السرعة القصوى — بطيء جدا لحماية اللوحة
 PROBE_ACCEL_SCALE  = 0.02
-PROBE_APPROACH_OFF = 0.040    # 40mm خارج الحافة المتوقعة (نقطة انطلاق آمنة)
-PROBE_MAX_TRAVEL   = 0.070    # 70mm اقصى مسافة قبل الاستسلام
-PROBE_RETREAT      = 0.020    # 20mm تراجع بعد التلامس
+PROBE_MAX_TRAVEL   = 0.200    # اقصى مسافة تحرك قبل الاستسلام (200mm كافٍ للوصول)
+PROBE_POST_LIFT    = 0.010    # 10mm رفع فور التلامس (قبل الانتقال للنقطة التالية)
+PROBE_TRANSIT_Z    = safe_h + 0.080  # ارتفاع الانتقال بين النقاط (8cm فوق الآمن)
 PROBE_FORCE_THRESH = 5.0      # نيوتن (|F_xy|) — عتبة كشف التلامس
 PROBE_BIAS_SAMPLES = 50       # عدد عينات لحساب bias القوة
 PROBE_BIAS_RATE_HZ = 100
-PROBE_EDGE_SAMPLE_V = 0.050   # المسافة بين اللمسة والركن على نفس الحافة (حد ادنى)
+
+# --- نقاط بدء الـprobing (يدخلها المستخدم، اطار الروبوت العالمي) ---
+# الحافة الغربية (يسار اللوحة) — الجريبر ينطلق منها باتجاه -Y ليلمس اللوحة
+W1_START_XY = (0.50,  0.20)
+W2_START_XY = (0.60,  0.20)
+W_PROBE_DIR = (0.0, -1.0)     # اتجاه اللمس: -Y (نحو اللوحة)
+
+# الحافة الجنوبية (خلف الصف 1) — الجريبر ينطلق منها باتجاه +Y ليلمس اللوحة
+S1_START_XY = (0.30, -0.20)
+S2_START_XY = (0.40, -0.20)
+S_PROBE_DIR = (0.0, +1.0)     # اتجاه اللمس: +Y (نحو اللوحة)
 
 CALIB_FILE = os.path.expanduser("~/board_calibration.yaml")
 
@@ -349,46 +359,39 @@ def probe_linear(move_group, force_monitor, direction_xy,
 # =====================================================================
 def calibrate_board(arm, force_monitor):
     """
-    تنفذ 4 لمسات مرتبة:
-      W1, W2 على الحافة الغربية (جانب a)   -> يعطينا خط الغرب (اتجاه e_N وموقعه)
-      S1, S2 على الحافة الجنوبية (جانب row1) -> يعطينا خط الجنوب (اتجاه e_h وموقعه)
-    ثم تقاطع الخطين = الركن الخارجي للوحة قرب a1.
+    تنفذ 4 لمسات مرتبة باستخدام نقاط البدء المحددة في الثوابت:
+      W1 (0.5, 0.2), W2 (0.6, 0.2)  — يسار اللوحة، تلامس باتجاه -Y
+      S1 (0.3,-0.2), S2 (0.4,-0.2) — خلف اللوحة، تلامس باتجاه +Y
 
-    يحدّث board_corner, board_theta, e_h_axis, e_N_axis ثم يعيد بناء المواقع.
+    التسلسل لكل لمسة:
+      1) ارتفاع انتقال (PROBE_TRANSIT_Z) + التحرك XY لنقطة البدء
+      2) نزول الى PROBE_Z
+      3) probe بطيء باتجاه اللوحة حتى تلامس
+      4) رفع فوري 1cm بعد التلامس (PROBE_POST_LIFT)
+      5) رفع الى PROBE_TRANSIT_Z استعداداً للنقطة التالية
+
+    النتيجة: e_N من (W1->W2)، e_h من (S1->S2)، corner = تقاطع الحافتين.
     """
     global board_corner, board_theta, e_h_axis, e_N_axis
 
-    # انطلق من القيم الحالية (افتراضية او من تحميل سابق)
-    corner0 = board_corner.copy()
-    eh0     = e_h_axis.copy()
-    eN0     = e_N_axis.copy()
-
-    # --- نقاط الانطلاق (في الاطار المحلي قبل المعايرة) ---
-    # الحافة الغربية: u=0، نلمس في +e_h من نقطة عند u=-PROBE_APPROACH_OFF
-    v_w1 = PROBE_EDGE_SAMPLE_V                              # قرب row 1
-    v_w2 = BOARD_OUTER_SIZE - PROBE_EDGE_SAMPLE_V           # قرب row 8
-    # الحافة الجنوبية: v=0، نلمس في +e_N من نقطة عند v=-PROBE_APPROACH_OFF
-    u_s1 = PROBE_EDGE_SAMPLE_V                              # قرب a-side
-    u_s2 = BOARD_OUTER_SIZE - PROBE_EDGE_SAMPLE_V           # قرب h-side
-
-    W1_start = corner0 + (-PROBE_APPROACH_OFF) * eh0 + v_w1 * eN0
-    W2_start = corner0 + (-PROBE_APPROACH_OFF) * eh0 + v_w2 * eN0
-    S1_start = corner0 + u_s1 * eh0 + (-PROBE_APPROACH_OFF) * eN0
-    S2_start = corner0 + u_s2 * eh0 + (-PROBE_APPROACH_OFF) * eN0
-
     probes = [
-        ("W1 (west edge, near row 1)",  W1_start, eh0),
-        ("W2 (west edge, near row 8)",  W2_start, eh0),
-        ("S1 (south edge, near a-side)", S1_start, eN0),
-        ("S2 (south edge, near h-side)", S2_start, eN0),
+        ("W1 (west edge, x=0.5)", W1_START_XY, W_PROBE_DIR),
+        ("W2 (west edge, x=0.6)", W2_START_XY, W_PROBE_DIR),
+        ("S1 (south edge, x=0.3)", S1_START_XY, S_PROBE_DIR),
+        ("S2 (south edge, x=0.4)", S2_START_XY, S_PROBE_DIR),
     ]
 
     rospy.loginfo("="*62)
     rospy.loginfo("Starting board calibration (4 probes)")
-    rospy.loginfo(f"  approach offset : {PROBE_APPROACH_OFF*1000:.0f} mm outside edge")
-    rospy.loginfo(f"  probe speed     : {PROBE_SPEED_SCALE*100:.0f}% of max")
-    rospy.loginfo(f"  force threshold : {PROBE_FORCE_THRESH:.1f} N")
-    rospy.loginfo(f"  probe height Z  : {PROBE_Z:.3f} m")
+    rospy.loginfo(f"  probe height Z   : {PROBE_Z:.3f} m")
+    rospy.loginfo(f"  transit height Z : {PROBE_TRANSIT_Z:.3f} m")
+    rospy.loginfo(f"  post-contact lift: {PROBE_POST_LIFT*1000:.0f} mm")
+    rospy.loginfo(f"  probe speed      : {PROBE_SPEED_SCALE*100:.0f}% of max")
+    rospy.loginfo(f"  force threshold  : {PROBE_FORCE_THRESH:.1f} N")
+    rospy.loginfo(f"  max travel       : {PROBE_MAX_TRAVEL*1000:.0f} mm")
+    for name, xy, d in probes:
+        rospy.loginfo(f"  {name}: start=({xy[0]:+.3f},{xy[1]:+.3f}) "
+                      f"dir=({d[0]:+.1f},{d[1]:+.1f})")
     rospy.loginfo("="*62)
 
     ans = input("Make sure the workspace is CLEAR. Proceed? [y/N]: ").strip().lower()
@@ -400,35 +403,44 @@ def calibrate_board(arm, force_monitor):
     for name, start_xy, direction in probes:
         rospy.loginfo(f"\n[Probe] {name}")
 
-        # 1) ارتفع للارتفاع الآمن
+        # 1) ارتفاع الى ارتفاع الانتقال اولاً (امان)
         cur = arm.get_current_pose().pose
-        move_to_pose(arm, cur.position.x, cur.position.y, safe_h,
+        move_to_pose(arm, cur.position.x, cur.position.y, PROBE_TRANSIT_Z,
                      v_slow, a_slow, yaw=0.0)
 
-        # 2) انتقل لنقطة الانطلاق (XY)
-        rospy.loginfo(f"  approach -> ({start_xy[0]:+.4f}, {start_xy[1]:+.4f})")
-        move_to_pose(arm, start_xy[0], start_xy[1], safe_h,
+        # 2) انتقل افقياً لنقطة البدء على ارتفاع الانتقال
+        rospy.loginfo(f"  move -> start ({start_xy[0]:+.4f}, {start_xy[1]:+.4f}) "
+                      f"@ Z={PROBE_TRANSIT_Z:.3f}")
+        move_to_pose(arm, start_xy[0], start_xy[1], PROBE_TRANSIT_Z,
                      v_slow, a_slow, yaw=0.0)
 
-        # 3) انزل لارتفاع الـprobe
+        # 3) انزل الى ارتفاع الـprobe
+        rospy.loginfo(f"  descend -> Z={PROBE_Z:.3f}")
         move_to_pose(arm, start_xy[0], start_xy[1], PROBE_Z,
                      v_slow, a_slow, yaw=0.0)
 
         # 4) نفّذ الـprobe
-        contact = probe_linear(arm, force_monitor, direction)
+        contact = probe_linear(arm, force_monitor, direction,
+                               max_travel=PROBE_MAX_TRAVEL)
         if contact is None:
-            rospy.logerr(f"{name}: no contact. Aborting calibration.")
+            rospy.logerr(f"{name}: no contact detected within {PROBE_MAX_TRAVEL*1000:.0f}mm. "
+                         "Aborting calibration.")
+            # محاولة رفع امن قبل الخروج
             cur = arm.get_current_pose().pose
-            move_to_pose(arm, cur.position.x, cur.position.y, safe_h,
+            move_to_pose(arm, cur.position.x, cur.position.y, PROBE_TRANSIT_Z,
                          v_slow, a_slow, yaw=0.0)
             return False
-        rospy.loginfo(f"  contact  @ ({contact[0]:+.4f}, {contact[1]:+.4f})")
+        rospy.loginfo(f"  contact @ ({contact[0]:+.4f}, {contact[1]:+.4f})")
         contacts.append(contact)
 
-        # 5) تراجع قليلاً في اتجاه معاكس ثم ارتفع
-        back = contact - np.asarray(direction)/np.linalg.norm(direction)*PROBE_RETREAT
-        move_to_pose(arm, back[0], back[1], PROBE_Z, v_slow, a_slow, yaw=0.0)
-        move_to_pose(arm, back[0], back[1], safe_h,  v_slow, a_slow, yaw=0.0)
+        # 5) رفع فوري 1cm (يمنع اي احتكاك اثناء الانتقال)
+        lift_z = PROBE_Z + PROBE_POST_LIFT
+        move_to_pose(arm, contact[0], contact[1], lift_z,
+                     v_slow, a_slow, yaw=0.0)
+
+        # 6) رفع الى ارتفاع الانتقال (استعداد للنقطة التالية)
+        move_to_pose(arm, contact[0], contact[1], PROBE_TRANSIT_Z,
+                     v_slow, a_slow, yaw=0.0)
 
     W1, W2, S1, S2 = contacts
 
