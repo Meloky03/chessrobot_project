@@ -550,6 +550,20 @@ def show_calibration():
           f"({hx:+.4f}, {hy:+.4f}, {hz:+.4f})")
 
 
+def test_calibration(arm):
+    """
+    تحقق بصري من المعايرة: يمر الذراع فوق الأركان الأربعة (a1, h1, h8, a8)
+    ثم يعود إلى home. كل الحركات على safe_h والجريبر يدور مع اللوحة.
+    """
+    for sq in ('a1', 'h1', 'h8', 'a8'):
+        p = mirrored_squares[sq]
+        rospy.loginfo(f"  test -> {sq} @ ({p[0]:+.4f}, {p[1]:+.4f})")
+        move_to_pose(arm, p[0], p[1], safe_h, v_slow, a_slow)
+        rospy.sleep(0.3)
+    rospy.loginfo("  test -> home")
+    move_to_pose(arm, hx, hy, hz, v_slow, a_slow)
+
+
 # =====================================================================
 # --- حلقة التحكم اليدوي ---
 # =====================================================================
@@ -587,6 +601,7 @@ def manual_control():
     print("  calibrate       : run 4-point board calibration")
     print("  save | load     : persist / restore calibration YAML")
     print("  show            : print current calibration")
+    print("  test            : sweep 4 corners + home to verify calibration")
     print("  exit            : quit")
 
     while not rospy.is_shutdown():
@@ -622,6 +637,8 @@ def manual_control():
             load_calibration(); continue
         if cmd == 'show':
             show_calibration(); continue
+        if cmd == 'test':
+            test_calibration(arm); continue
 
         # --- اهداف الحركة ---
         target_pos = None
