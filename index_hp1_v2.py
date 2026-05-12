@@ -42,13 +42,15 @@ MARGIN           = (BOARD_OUTER_SIZE - PLAY_AREA_SIZE)/2.0  # 0.030m
 PROBE_Z            = 0.06
 PROBE_SPEED_SCALE  = 0.02
 PROBE_ACCEL_SCALE  = 0.02
-PROBE_MAX_TRAVEL   = 0.200
+PROBE_MAX_TRAVEL   = 1.000   # حد امان بعيد: يمشي لحد ما يلامس
 PROBE_RETREAT      = 0.020
 PROBE_POST_LIFT    = 0.010
 PROBE_TRANSIT_Z    = safe_h + 0.080
 PROBE_FORCE_THRESH = 5.0
 PROBE_BIAS_SAMPLES = 50
 PROBE_BIAS_RATE_HZ = 100
+PROBE_STALL_WIN_S  = 0.3     # نافذة مراقبة التوقف
+PROBE_STALL_EPS    = 0.0005  # ازا تحرك اقل من 0.5mm بالنافذة = توقف (contact)
 PROBE_CONTACT_CONSEC  = 3       # عدد العينات المتتالية فوق العتبة لتأكيد اللمس
 PROBE_MIN_TRAVEL      = 0.005   # أقل مسافة (م) قبل قبول أي contact (لتجاهل spike البداية)
 
@@ -270,24 +272,42 @@ def probe_linear(move_group, force_monitor, direction_xy,
     contact = False
     consec = 0
     t0 = rospy.Time.now()
-    timeout = 30.0
+    timeout = 60.0
+    stall_ref_pos  = np.array([start[0], start[1]])
+    stall_ref_time = rospy.Time.now()
     while not rospy.is_shutdown() and (rospy.Time.now() - t0).to_sec() < timeout:
         fmag = force_monitor.get_xy_magnitude()
         cur_now = move_group.get_current_pose().pose
-        traveled = np.hypot(cur_now.position.x - start[0],
-                            cur_now.position.y - start[1])
+        cur_xy  = np.array([cur_now.position.x, cur_now.position.y])
+        traveled = np.hypot(cur_xy[0] - start[0], cur_xy[1] - start[1])
+
+        # (1) كشف بالقوة
         if fmag > force_threshold and traveled > PROBE_MIN_TRAVEL:
             consec += 1
             if consec >= PROBE_CONTACT_CONSEC:
                 move_group.stop()
-                rospy.loginfo(f"  [probe] CONTACT! |F_xy|={fmag:.2f} N "
+                rospy.loginfo(f"  [probe] CONTACT (force)! |F_xy|={fmag:.2f} N "
                               f"traveled={traveled*1000:.1f}mm")
                 contact = True
                 break
         else:
             consec = 0
-        if np.hypot(target_xy[0]-cur_now.position.x,
-                    target_xy[1]-cur_now.position.y) < 0.002:
+
+        # (2) كشف بالتوقف (stall) - مفيد بالمحاكاة
+        if (rospy.Time.now() - stall_ref_time).to_sec() >= PROBE_STALL_WIN_S:
+            moved = np.hypot(cur_xy[0]-stall_ref_pos[0],
+                             cur_xy[1]-stall_ref_pos[1])
+            if traveled > PROBE_MIN_TRAVEL and moved < PROBE_STALL_EPS:
+                move_group.stop()
+                rospy.loginfo(f"  [probe] CONTACT (stall)! moved={moved*1000:.2f}mm "
+                              f"in {PROBE_STALL_WIN_S:.2f}s, traveled={traveled*1000:.1f}mm")
+                contact = True
+                break
+            stall_ref_pos  = cur_xy
+            stall_ref_time = rospy.Time.now()
+
+        if np.hypot(target_xy[0]-cur_xy[0],
+                    target_xy[1]-cur_xy[1]) < 0.002:
             rospy.logwarn("  [probe] reached max_travel without contact")
             break
         rate.sleep()
