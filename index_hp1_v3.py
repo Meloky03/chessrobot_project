@@ -20,15 +20,16 @@ import actionlib
 from std_msgs.msg import String
 from geometry_msgs.msg import Pose, Quaternion
 from tf.transformations import quaternion_from_euler
-from franka_gripper.msg import MoveAction, MoveGoal
+from franka_gripper.msg import MoveAction, MoveGoal, GraspAction, GraspGoal, GraspEpsilon
 from franka_msgs.msg import FrankaState
  
 # =====================================================================
 # --- متغيرات التحكم العالمية ---
 # =====================================================================
 OPEN_WIDTH = 0.04
-CLOSE_WIDTH = 0.025
+CLOSE_WIDTH = 0.0
 GRIPPER_SPEED = 0.1
+GRIPPER_FORCE = 40.0   # قوة الـgrasp (N) - تبقي الجريبر مسكّر حتى لو لامس شي
  
 v_slow, a_slow = 0.7, 0.7
 safe_h = 0.085
@@ -615,9 +616,20 @@ def manual_control():
         '/panda1/franka_gripper/move', MoveAction)
     gripper_client.wait_for_server()
 
-    # اقفل الجريبر تلقائياً عند البداية (حالة افتراضية موثوقة قبل اي probing)
-    rospy.loginfo("Closing gripper on startup ...")
-    gripper_control(gripper_client, "close")
+    # grasp action: يسكّر الجريبر بقوة ويبقى مغلق حتى لو لمس شي
+    grasp_client = actionlib.SimpleActionClient(
+        '/panda1/franka_gripper/grasp', GraspAction)
+    grasp_client.wait_for_server()
+
+    # اقفل الجريبر بالكامل وبقوة عند البداية (يبقى مسكر حتى لو لامس شيء)
+    rospy.loginfo("Force-closing gripper on startup (full close, grasp) ...")
+    g = GraspGoal()
+    g.width = 0.0                 # full close
+    g.speed = GRIPPER_SPEED
+    g.force = GRIPPER_FORCE
+    g.epsilon = GraspEpsilon(inner=0.08, outer=0.08)  # اقبل أي عرض نهائي
+    grasp_client.send_goal(g)
+    grasp_client.wait_for_result()
  
     force_monitor = ForceMonitor()
     try:
