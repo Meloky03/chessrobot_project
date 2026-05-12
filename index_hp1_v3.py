@@ -215,6 +215,17 @@ def move_to_pose(move_group, x, y, z, vf, af, yaw=None):
             move_group.get_current_state(), plan, vf, af,
             "iterative_time_parameterization")
         move_group.execute(plan, wait=True)
+    else:
+        # الكارتيزيان فشل (عادةً لما يكون في تغيير yaw كبير بنفس النقطة).
+        # نعمل fallback لـjoint-space planning عبر set_pose_target.
+        rospy.logwarn(f"  [move_to_pose] cartesian fraction={fraction:.2f} "
+                      f"(<0.9), falling back to joint-space plan")
+        move_group.set_max_velocity_scaling_factor(vf)
+        move_group.set_max_acceleration_scaling_factor(af)
+        move_group.set_pose_target(pose)
+        ok = move_group.go(wait=True)
+        if not ok:
+            rospy.logerr("  [move_to_pose] joint-space plan also failed")
     move_group.stop()
     move_group.clear_pose_targets()
  
