@@ -49,6 +49,15 @@ PROBE_TRANSIT_Z    = safe_h + 0.080
 PROBE_FORCE_THRESH = 5.0
 PROBE_BIAS_SAMPLES = 50
 PROBE_BIAS_RATE_HZ = 100
+PROBE_CONTACT_CONSEC  = 3       # عدد العينات المتتالية فوق العتبة لتأكيد اللمس
+PROBE_MIN_TRAVEL      = 0.005   # أقل مسافة (م) قبل قبول أي contact (لتجاهل spike البداية)
+PROBE_STALL_WIN_S     = 0.4     # نافذة مراقبة التوقف (ثانية)
+PROBE_STALL_EPS       = 0.0005  # اذا تحرك < 0.5mm بالنافذة = توقف حقيقي (contact)
+
+# --- ازاحة طرف القابض عن مركز TCP (نصف عرض الاصبع باتجاه اللمس) ---
+# هذه المسافة بين مركز الجريبر وحافته الخارجية التي تلمس اللوحة.
+# تُستخدم لتصحيح نقاط التلامس بعد اجراء المعايرة.
+GRIPPER_TIP_OFFSET = 0.018
 
 # --- نقاط بدء الـprobing ---
 W1_START_XY = (0.50,  0.20)
@@ -261,18 +270,45 @@ def probe_linear(move_group, force_monitor, direction_xy,
 
     rate = rospy.Rate(200)
     contact = False
+    consec = 0
     t0 = rospy.Time.now()
-    timeout = 30.0
+    timeout = 60.0
+    stall_ref_pos  = np.array([start[0], start[1]])
+    stall_ref_time = rospy.Time.now()
     while not rospy.is_shutdown() and (rospy.Time.now() - t0).to_sec() < timeout:
         fmag = force_monitor.get_xy_magnitude()
-        if fmag > force_threshold:
-            move_group.stop()
-            rospy.loginfo(f"  [probe] CONTACT! |F_xy|={fmag:.2f} N")
-            contact = True
-            break
         cur_now = move_group.get_current_pose().pose
-        if np.hypot(target_xy[0]-cur_now.position.x,
-                    target_xy[1]-cur_now.position.y) < 0.002:
+        cur_xy = np.array([cur_now.position.x, cur_now.position.y])
+        traveled = np.hypot(cur_xy[0] - start[0], cur_xy[1] - start[1])
+
+        # (1) كشف بالقوة
+        if fmag > force_threshold and traveled > PROBE_MIN_TRAVEL:
+            consec += 1
+            if consec >= PROBE_CONTACT_CONSEC:
+                move_group.stop()
+                rospy.loginfo(f"  [probe] CONTACT (force)! |F_xy|={fmag:.2f} N "
+                              f"traveled={traveled*1000:.1f}mm")
+                contact = True
+                break
+        else:
+            consec = 0
+
+        # (2) كشف بالتوقف (stall): الذراع توقف عن التقدم رغم انه مأمور
+        if (rospy.Time.now() - stall_ref_time).to_sec() >= PROBE_STALL_WIN_S:
+            moved = np.hypot(cur_xy[0]-stall_ref_pos[0],
+                             cur_xy[1]-stall_ref_pos[1])
+            if traveled > PROBE_MIN_TRAVEL and moved < PROBE_STALL_EPS:
+                move_group.stop()
+                rospy.loginfo(f"  [probe] CONTACT (stall)! moved={moved*1000:.2f}mm "
+                              f"in {PROBE_STALL_WIN_S:.2f}s, "
+                              f"traveled={traveled*1000:.1f}mm")
+                contact = True
+                break
+            stall_ref_pos  = cur_xy
+            stall_ref_time = rospy.Time.now()
+
+        if np.hypot(target_xy[0]-cur_xy[0],
+                    target_xy[1]-cur_xy[1]) < 0.002:
             rospy.logwarn("  [probe] reached max_travel without contact")
             break
         rate.sleep()
@@ -318,6 +354,7 @@ def calibrate_board(arm, force_monitor):
         return False
 
     contacts = []
+    probe_dirs = []
     for name, start_xy, direction, probe_yaw in probes:
         rospy.loginfo(f"[Probe] {name}")
 
@@ -345,6 +382,8 @@ def calibrate_board(arm, force_monitor):
             return False
         rospy.loginfo(f"  contact @ ({contact[0]:+.4f}, {contact[1]:+.4f})")
         contacts.append(contact)
+        probe_dirs.append(np.asarray(direction, dtype=float) /
+                          np.linalg.norm(direction))
 
         d_norm = np.asarray(direction, dtype=float)
         d_norm = d_norm / np.linalg.norm(d_norm)
@@ -376,6 +415,27 @@ def calibrate_board(arm, force_monitor):
     if perp_err_deg > 3.0:
         rospy.logwarn(f"  WARNING: perp. error large. Verify probe contacts.")
 
+    eN_as_eh = np.array([ eN_meas[1], -eN_meas[0] ])
+    eh_avg = (eh_meas + eN_as_eh) / 2.0
+    eh_avg = eh_avg / np.linalg.norm(eh_avg)
+    eN_fix = np.array([ -eh_avg[1], eh_avg[0] ])
+
+    # --- تصحيح نقاط التلامس بازاحة نصف عرض الجريبر ---
+    # عند كل probe، نقطة الـTCP المسجلة هي مركز الجريبر،
+    # اما حافته التي لمست اللوحة فتبعد GRIPPER_TIP_OFFSET باتجاه الحركة.
+    # اذن مركز الحافة الحقيقية = TCP + dir * offset.
+    rospy.loginfo(f"Applying gripper tip offset = "
+                  f"{GRIPPER_TIP_OFFSET*1000:.1f} mm to contacts")
+    contacts_corr = [c + d * GRIPPER_TIP_OFFSET
+                     for c, d in zip(contacts, probe_dirs)]
+    W1, W2, S1, S2 = contacts_corr
+    for (name, _, _, _), c_raw, c_cor in zip(probes, contacts, contacts_corr):
+        rospy.loginfo(f"  {name}: raw=({c_raw[0]:+.4f},{c_raw[1]:+.4f}) "
+                      f"-> corr=({c_cor[0]:+.4f},{c_cor[1]:+.4f})")
+
+    # اعادة حساب المحاور من النقاط المصححة (الاتجاه نفسه، لكن المواضع دقيقة)
+    eN_meas = (W2 - W1) / np.linalg.norm(W2 - W1)
+    eh_meas = (S2 - S1) / np.linalg.norm(S2 - S1)
     eN_as_eh = np.array([ eN_meas[1], -eN_meas[0] ])
     eh_avg = (eh_meas + eN_as_eh) / 2.0
     eh_avg = eh_avg / np.linalg.norm(eh_avg)
@@ -561,4 +621,3 @@ if __name__ == '__main__':
         manual_control()
     except rospy.ROSInterruptException:
         pass
-
