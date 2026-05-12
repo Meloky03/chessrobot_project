@@ -505,7 +505,11 @@ def calibrate_board(arm, force_monitor, gripper_client=None):
         return False
     corner_meas = W1 + uv[0] * eN_fix
 
-    theta_meas = float(np.arctan2(eh_avg[1], eh_avg[0])) - np.pi/2.0
+    # زاوية ميل اللوحة فقط (بدون قلبة 180 الناتجة عن اتجاه القياس):
+    # في الحالة المثالية المقاسة eh_avg = (0, -1) لأن S2 تحت S1 بمحور Y.
+    # نحسب الزاوية من (0, -1) الى eh_avg الفعلي → ميل اللوحة.
+    # CCW: theta = atan2(eh.x, -eh.y)
+    theta_meas = float(np.arctan2(eh_avg[0], -eh_avg[1]))
 
     board_corner = corner_meas
     e_h_axis     = eh_avg
