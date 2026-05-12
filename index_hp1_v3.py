@@ -31,7 +31,7 @@ CLOSE_WIDTH = 0.025
 GRIPPER_SPEED = 0.1
  
 v_slow, a_slow = 0.7, 0.7
-safe_h = 0.085
+safe_h = 0.12
  
 # --- ثوابت الهندسة للوحة ---
 BOARD_OUTER_SIZE = 0.360
@@ -42,7 +42,7 @@ MARGIN           = (BOARD_OUTER_SIZE - PLAY_AREA_SIZE)/2.0  # 0.030m
 PROBE_Z            = 0.06
 PROBE_SPEED_SCALE  = 0.02
 PROBE_ACCEL_SCALE  = 0.02
-PROBE_MAX_TRAVEL   = 0.200
+PROBE_MAX_TRAVEL   = 0.4
 PROBE_RETREAT      = 0.020
 PROBE_POST_LIFT    = 0.010
 PROBE_TRANSIT_Z    = safe_h + 0.080
@@ -55,7 +55,7 @@ PROBE_MIN_TRAVEL      = 0.005   # أقل مسافة (م) قبل قبول أي co
 # --- ازاحة طرف القابض عن مركز TCP (نصف عرض الاصبع باتجاه اللمس) ---
 # هذه المسافة بين مركز الجريبر وحافته الخارجية التي تلمس اللوحة.
 # تُستخدم لتصحيح نقاط التلامس بعد اجراء المعايرة.
-GRIPPER_TIP_OFFSET = 0.018
+GRIPPER_TIP_OFFSET = 0.018/2
  
 # --- نقاط بدء الـprobing ---
 W1_START_XY = (0.50,  0.20)
@@ -93,6 +93,7 @@ hx = hy = hz = 0.0
 # =====================================================================
 # --- بناء خرائط المواقع ---
 # =====================================================================
+
 def build_positions(corner=None, eh=None, eN=None):
     global square_positions, mirrored_squares, promotion_positions, graveyard_positions
     global hx, hy, hz
