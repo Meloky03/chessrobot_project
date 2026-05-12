@@ -614,6 +614,10 @@ def manual_control():
     gripper_client = actionlib.SimpleActionClient(
         '/panda1/franka_gripper/move', MoveAction)
     gripper_client.wait_for_server()
+
+    # اقفل الجريبر تلقائياً عند البداية (حالة افتراضية موثوقة قبل اي probing)
+    rospy.loginfo("Closing gripper on startup ...")
+    gripper_control(gripper_client, "close")
  
     force_monitor = ForceMonitor()
     try:
