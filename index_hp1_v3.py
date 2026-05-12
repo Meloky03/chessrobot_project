@@ -229,6 +229,18 @@ def gripper_control(move_client, action_type):
     goal.speed = float(GRIPPER_SPEED)
     move_client.send_goal(goal)
     move_client.wait_for_result()
+
+def gripper_full_close(move_client, speed=None):
+    """
+    يسكر القابض على width=0 (مضغوط تماماً) عشان لما يلامس اللوحة
+    أثناء الـprobing ما ينفتح. يُستخدم مرة واحدة ببداية التشغيل.
+    """
+    goal = MoveGoal()
+    goal.width = 0.0
+    goal.speed = float(GRIPPER_SPEED if speed is None else speed)
+    rospy.loginfo("Full-closing gripper to 0.0 m (pre-probe lock)")
+    move_client.send_goal(goal)
+    move_client.wait_for_result()
  
 # =====================================================================
 # --- محرك اللمس ---
@@ -305,8 +317,12 @@ def probe_linear(move_group, force_monitor, direction_xy,
 # =====================================================================
 # --- معايرة اللوحة ---
 # =====================================================================
-def calibrate_board(arm, force_monitor):
+def calibrate_board(arm, force_monitor, gripper_client=None):
     global board_corner, board_theta, e_h_axis, e_N_axis
+
+    # اغلاق كامل للقابض قبل المعايرة عشان اذا لامس اللوحة ما ينفتح
+    if gripper_client is not None:
+        gripper_full_close(gripper_client)
  
     probes = [
         ("W1 (west edge, x=0.5)", W1_START_XY, W_PROBE_DIR, W_PROBE_YAW),
@@ -562,7 +578,7 @@ def manual_control():
             continue
  
         if cmd in ('calibrate', 'calib'):
-            ok = calibrate_board(arm, force_monitor)
+            ok = calibrate_board(arm, force_monitor, gripper_client)
             if ok:
                 ans = input("Save calibration to YAML? [y/N]: ").strip().lower()
                 if ans == 'y':
