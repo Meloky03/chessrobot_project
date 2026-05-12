@@ -232,14 +232,12 @@ def gripper_control(move_client, action_type):
 
 def gripper_full_close(move_client, speed=None):
     """
-    يسكر القابض لأقصى حد ممكن (width صغيرة جداً) عشان لما يلامس اللوحة
-    أثناء الـprobing ما ينفتح. يُستخدم ببداية المعايرة.
-    نستعمل width=0.001 بدل 0.0 لتجنب اخطاء الـcontroller.
+    يسكر القابض لأقصى حد ممكن (width=0) عشان لما يلامس اللوحة أثناء
+    الـprobing ما ينفتح. يُنادى قبل كل probe.
     """
     goal = MoveGoal()
-    goal.width = 0.001
+    goal.width = 0.0
     goal.speed = float(GRIPPER_SPEED if speed is None else speed)
-    rospy.loginfo("Full-closing gripper (pre-probe lock)")
     move_client.send_goal(goal)
     move_client.wait_for_result()
  
@@ -320,10 +318,6 @@ def probe_linear(move_group, force_monitor, direction_xy,
 # =====================================================================
 def calibrate_board(arm, force_monitor, gripper_client=None):
     global board_corner, board_theta, e_h_axis, e_N_axis
-
-    # اغلاق كامل للقابض قبل المعايرة عشان اذا لامس اللوحة ما ينفتح
-    if gripper_client is not None:
-        gripper_full_close(gripper_client)
  
     probes = [
         ("W1 (west edge, x=0.5)", W1_START_XY, W_PROBE_DIR, W_PROBE_YAW),
@@ -354,6 +348,12 @@ def calibrate_board(arm, force_monitor, gripper_client=None):
     probe_dirs = []
     for name, start_xy, direction, probe_yaw in probes:
         rospy.loginfo(f"[Probe] {name}")
+
+        # اغلاق الجريبر بالكامل قبل بدء كل probe (W1/W2/S1/S2)
+        # عشان اذا لامس اللوحة اثناء الحركة ما ينفتح
+        if gripper_client is not None:
+            rospy.loginfo("  [probe] full-closing gripper before probe")
+            gripper_full_close(gripper_client)
  
         cur = arm.get_current_pose().pose
         move_to_pose(arm, cur.position.x, cur.position.y, PROBE_TRANSIT_Z,
