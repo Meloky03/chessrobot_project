@@ -50,6 +50,11 @@ PROBE_FORCE_THRESH = 5.0
 PROBE_BIAS_SAMPLES = 50
 PROBE_BIAS_RATE_HZ = 100
 
+# --- ازاحة طرف القابض عن مركز TCP (نصف عرض الاصبع باتجاه اللمس) ---
+# هذه المسافة بين مركز الجريبر وحافته الخارجية التي تلمس اللوحة.
+# تُستخدم لتصحيح نقاط التلامس بعد اجراء المعايرة.
+GRIPPER_TIP_OFFSET = 0.015
+
 # --- نقاط بدء الـprobing ---
 W1_START_XY = (0.50,  0.20)
 W2_START_XY = (0.60,  0.20)
@@ -318,6 +323,7 @@ def calibrate_board(arm, force_monitor):
         return False
 
     contacts = []
+    probe_dirs = []
     for name, start_xy, direction, probe_yaw in probes:
         rospy.loginfo(f"[Probe] {name}")
 
@@ -345,6 +351,8 @@ def calibrate_board(arm, force_monitor):
             return False
         rospy.loginfo(f"  contact @ ({contact[0]:+.4f}, {contact[1]:+.4f})")
         contacts.append(contact)
+        probe_dirs.append(np.asarray(direction, dtype=float) /
+                          np.linalg.norm(direction))
 
         d_norm = np.asarray(direction, dtype=float)
         d_norm = d_norm / np.linalg.norm(d_norm)
@@ -376,6 +384,27 @@ def calibrate_board(arm, force_monitor):
     if perp_err_deg > 3.0:
         rospy.logwarn(f"  WARNING: perp. error large. Verify probe contacts.")
 
+    eN_as_eh = np.array([ eN_meas[1], -eN_meas[0] ])
+    eh_avg = (eh_meas + eN_as_eh) / 2.0
+    eh_avg = eh_avg / np.linalg.norm(eh_avg)
+    eN_fix = np.array([ -eh_avg[1], eh_avg[0] ])
+
+    # --- تصحيح نقاط التلامس بازاحة نصف عرض الجريبر ---
+    # عند كل probe، نقطة الـTCP المسجلة هي مركز الجريبر،
+    # اما حافته التي لمست اللوحة فتبعد GRIPPER_TIP_OFFSET باتجاه الحركة.
+    # اذن مركز الحافة الحقيقية = TCP + dir * offset.
+    rospy.loginfo(f"Applying gripper tip offset = "
+                  f"{GRIPPER_TIP_OFFSET*1000:.1f} mm to contacts")
+    contacts_corr = [c + d * GRIPPER_TIP_OFFSET
+                     for c, d in zip(contacts, probe_dirs)]
+    W1, W2, S1, S2 = contacts_corr
+    for (name, _, _, _), c_raw, c_cor in zip(probes, contacts, contacts_corr):
+        rospy.loginfo(f"  {name}: raw=({c_raw[0]:+.4f},{c_raw[1]:+.4f}) "
+                      f"-> corr=({c_cor[0]:+.4f},{c_cor[1]:+.4f})")
+
+    # اعادة حساب المحاور من النقاط المصححة (الاتجاه نفسه، لكن المواضع دقيقة)
+    eN_meas = (W2 - W1) / np.linalg.norm(W2 - W1)
+    eh_meas = (S2 - S1) / np.linalg.norm(S2 - S1)
     eN_as_eh = np.array([ eN_meas[1], -eN_meas[0] ])
     eh_avg = (eh_meas + eN_as_eh) / 2.0
     eh_avg = eh_avg / np.linalg.norm(eh_avg)
