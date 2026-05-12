@@ -215,17 +215,6 @@ def move_to_pose(move_group, x, y, z, vf, af, yaw=None):
             move_group.get_current_state(), plan, vf, af,
             "iterative_time_parameterization")
         move_group.execute(plan, wait=True)
-    else:
-        # الكارتيزيان فشل (عادةً لما يكون في تغيير yaw كبير بنفس النقطة).
-        # نعمل fallback لـjoint-space planning عبر set_pose_target.
-        rospy.logwarn(f"  [move_to_pose] cartesian fraction={fraction:.2f} "
-                      f"(<0.9), falling back to joint-space plan")
-        move_group.set_max_velocity_scaling_factor(vf)
-        move_group.set_max_acceleration_scaling_factor(af)
-        move_group.set_pose_target(pose)
-        ok = move_group.go(wait=True)
-        if not ok:
-            rospy.logerr("  [move_to_pose] joint-space plan also failed")
     move_group.stop()
     move_group.clear_pose_targets()
  
@@ -243,13 +232,14 @@ def gripper_control(move_client, action_type):
 
 def gripper_full_close(move_client, speed=None):
     """
-    يسكر القابض على width=0 (مضغوط تماماً) عشان لما يلامس اللوحة
-    أثناء الـprobing ما ينفتح. يُستخدم مرة واحدة ببداية التشغيل.
+    يسكر القابض لأقصى حد ممكن (width صغيرة جداً) عشان لما يلامس اللوحة
+    أثناء الـprobing ما ينفتح. يُستخدم ببداية المعايرة.
+    نستعمل width=0.001 بدل 0.0 لتجنب اخطاء الـcontroller.
     """
     goal = MoveGoal()
-    goal.width = 0.0
+    goal.width = 0.001
     goal.speed = float(GRIPPER_SPEED if speed is None else speed)
-    rospy.loginfo("Full-closing gripper to 0.0 m (pre-probe lock)")
+    rospy.loginfo("Full-closing gripper (pre-probe lock)")
     move_client.send_goal(goal)
     move_client.wait_for_result()
  
