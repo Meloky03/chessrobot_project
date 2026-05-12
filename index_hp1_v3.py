@@ -46,7 +46,9 @@ PROBE_MAX_TRAVEL   = 0.4
 PROBE_RETREAT      = 0.020
 PROBE_POST_LIFT    = 0.010
 PROBE_TRANSIT_Z    = safe_h + 0.080
-PROBE_FORCE_THRESH = 5.0
+PROBE_FORCE_THRESH   = 5.0   # عتبة W probes (الافتراضية)
+PROBE_FORCE_THRESH_S = 3.0   # عتبة S probes - اقل عشان يحس باللمسة بسرعة
+                              # ويوقف فورا بدل ما يضغط على اللوحة
 PROBE_BIAS_SAMPLES = 50
 PROBE_BIAS_RATE_HZ = 100
 PROBE_CONTACT_CONSEC  = 3       # عدد العينات المتتالية فوق العتبة لتأكيد اللمس
@@ -322,10 +324,12 @@ def probe_linear(move_group, force_monitor, direction_xy,
 # --- دالة مساعدة: تنفيذ probe كاملة (approach + touch + retreat) ---
 # =====================================================================
 def _do_probe(arm, force_monitor, gripper_client,
-              name, start_xy, direction, probe_yaw):
+              name, start_xy, direction, probe_yaw,
+              force_threshold=PROBE_FORCE_THRESH):
     """
     تسكّر الجريبر، ترفع، تروح لـstart، تنزل، تلامس، بعدين تتراجع وترفع.
     ترجع نقطة التلامس (TCP) أو None لو فشلت.
+    force_threshold: عتبة القوة لاكتشاف اللمس (قابلة للتخصيص لكل probe).
     """
     rospy.loginfo(f"[Probe] {name}")
 
@@ -347,7 +351,8 @@ def _do_probe(arm, force_monitor, gripper_client,
                  v_slow, a_slow, yaw=probe_yaw)
 
     contact = probe_linear(arm, force_monitor, direction,
-                           max_travel=PROBE_MAX_TRAVEL)
+                           max_travel=PROBE_MAX_TRAVEL,
+                           force_threshold=force_threshold)
     if contact is None:
         rospy.logerr(f"{name}: no contact detected within "
                      f"{PROBE_MAX_TRAVEL*1000:.0f}mm.")
@@ -437,17 +442,18 @@ def calibrate_board(arm, force_monitor, gripper_client=None):
                   f"dir=({S_dir_rot[0]:+.3f},{S_dir_rot[1]:+.3f})")
 
     probes_p2 = [
-        ("W1 (pass2)", W1_START_XY, W_dir_rot, W_yaw_corr),
-        ("W2 (pass2)", W2_START_XY, W_dir_rot, W_yaw_corr),
-        ("S1 (pass2)", S1_START_XY, S_dir_rot, S_yaw_corr),
-        ("S2 (pass2)", S2_START_XY, S_dir_rot, S_yaw_corr),
+        ("W1 (pass2)", W1_START_XY, W_dir_rot, W_yaw_corr, PROBE_FORCE_THRESH),
+        ("W2 (pass2)", W2_START_XY, W_dir_rot, W_yaw_corr, PROBE_FORCE_THRESH),
+        ("S1 (pass2)", S1_START_XY, S_dir_rot, S_yaw_corr, PROBE_FORCE_THRESH_S),
+        ("S2 (pass2)", S2_START_XY, S_dir_rot, S_yaw_corr, PROBE_FORCE_THRESH_S),
     ]
 
     contacts = []
     probe_dirs = []
-    for name, start_xy, direction, probe_yaw in probes_p2:
+    for name, start_xy, direction, probe_yaw, thresh in probes_p2:
         contact = _do_probe(arm, force_monitor, gripper_client,
-                            name, start_xy, direction, probe_yaw)
+                            name, start_xy, direction, probe_yaw,
+                            force_threshold=thresh)
         if contact is None:
             rospy.logerr(f"{name}: aborting calibration.")
             return False
@@ -484,7 +490,7 @@ def calibrate_board(arm, force_monitor, gripper_client=None):
     contacts_corr = [c + d * GRIPPER_TIP_OFFSET
                      for c, d in zip(contacts, probe_dirs)]
     W1, W2, S1, S2 = contacts_corr
-    for (name, _, _, _), c_raw, c_cor in zip(probes_p2, contacts, contacts_corr):
+    for (name, *_rest), c_raw, c_cor in zip(probes_p2, contacts, contacts_corr):
         rospy.loginfo(f"  {name}: raw=({c_raw[0]:+.4f},{c_raw[1]:+.4f}) "
                       f"-> corr=({c_cor[0]:+.4f},{c_cor[1]:+.4f})")
 
