@@ -49,6 +49,8 @@ PROBE_TRANSIT_Z    = safe_h + 0.080
 PROBE_FORCE_THRESH = 5.0
 PROBE_BIAS_SAMPLES = 50
 PROBE_BIAS_RATE_HZ = 100
+PROBE_CONTACT_CONSEC  = 3       # عدد العينات المتتالية فوق العتبة لتأكيد اللمس
+PROBE_MIN_TRAVEL      = 0.005   # أقل مسافة (م) قبل قبول أي contact (لتجاهل spike البداية)
 
 # --- ازاحة طرف القابض عن مركز TCP (نصف عرض الاصبع باتجاه اللمس) ---
 # هذه المسافة بين مركز الجريبر وحافته الخارجية التي تلمس اللوحة.
@@ -266,16 +268,24 @@ def probe_linear(move_group, force_monitor, direction_xy,
 
     rate = rospy.Rate(200)
     contact = False
+    consec = 0
     t0 = rospy.Time.now()
     timeout = 30.0
     while not rospy.is_shutdown() and (rospy.Time.now() - t0).to_sec() < timeout:
         fmag = force_monitor.get_xy_magnitude()
-        if fmag > force_threshold:
-            move_group.stop()
-            rospy.loginfo(f"  [probe] CONTACT! |F_xy|={fmag:.2f} N")
-            contact = True
-            break
         cur_now = move_group.get_current_pose().pose
+        traveled = np.hypot(cur_now.position.x - start[0],
+                            cur_now.position.y - start[1])
+        if fmag > force_threshold and traveled > PROBE_MIN_TRAVEL:
+            consec += 1
+            if consec >= PROBE_CONTACT_CONSEC:
+                move_group.stop()
+                rospy.loginfo(f"  [probe] CONTACT! |F_xy|={fmag:.2f} N "
+                              f"traveled={traveled*1000:.1f}mm")
+                contact = True
+                break
+        else:
+            consec = 0
         if np.hypot(target_xy[0]-cur_now.position.x,
                     target_xy[1]-cur_now.position.y) < 0.002:
             rospy.logwarn("  [probe] reached max_travel without contact")
