@@ -49,8 +49,17 @@ PROBE_TRANSIT_Z    = safe_h + 0.080
 PROBE_FORCE_THRESH = 5.0
 PROBE_BIAS_SAMPLES = 50
 PROBE_BIAS_RATE_HZ = 100
-PROBE_CONTACT_CONSEC  = 3       # عدد العينات المتتالية فوق العتبة لتأكيد اللمس
-PROBE_MIN_TRAVEL      = 0.005   # أقل مسافة (م) قبل قبول أي contact (لتجاهل spike البداية)
+PROBE_CONTACT_CONSEC  = 15      # عدد العينات المتتالية فوق العتبة لتأكيد اللمس (~75ms @200Hz)
+PROBE_MIN_TRAVEL      = 0.025   # أقل مسافة (م) قبل قبول أي contact (لتجاوز مرحلة التسارع)
+# --- warm-up: نعيد حساب الـbias أثناء الحركة لنشيل القوى التقديرية الديناميكية ---
+PROBE_WARMUP_TRAVEL   = 0.025   # المسافة الدنيا اللي لازم تتقطع قبل re-bias
+PROBE_WARMUP_SAMPLES  = 60      # أقل عدد عينات نجمعها خلال الـwarm-up
+PROBE_WARMUP_SKIP     = 0.010   # نتجاهل أول 10mm (مرحلة التسارع) قبل بدء الجمع
+# --- Sliding baseline: bias يتحدث مستمر أثناء الحركة (EMA) ---
+# يتعامل مع القوى التقديرية اللي بتتغير مع الـ joint configuration.
+# لما صار فيه contact حقيقي (قوة > half-threshold)، نجمّد الـbias.
+PROBE_EMA_ALPHA       = 0.02    # معدل التحديث: baseline_new = (1-a)*baseline + a*raw
+PROBE_EMA_FREEZE_FRAC = 0.5     # فوق نصف العتبة، نجمّد الـ baseline
  
 # --- ازاحة طرف القابض عن مركز TCP (نصف عرض الاصبع باتجاه اللمس) ---
 # هذه المسافة بين مركز الجريبر وحافته الخارجية التي تلمس اللوحة.
@@ -188,6 +197,24 @@ class ForceMonitor:
                       f"({self._bias_xyz[0]:+.2f}, {self._bias_xyz[1]:+.2f}, "
                       f"{self._bias_xyz[2]:+.2f}) N")
  
+    def set_bias(self, bias_xyz):
+        """تعيين قيمة bias مباشرة (مثلاً من عينات مجمّعة اثناء الحركة)."""
+        self._bias_xyz = np.asarray(bias_xyz, dtype=float).copy()
+        rospy.loginfo(f"  [ForceMonitor] bias* = "
+                      f"({self._bias_xyz[0]:+.2f}, {self._bias_xyz[1]:+.2f}, "
+                      f"{self._bias_xyz[2]:+.2f}) N")
+
+    def get_raw_xyz(self):
+        """قراءة القوى الخام (قبل طرح الـbias)."""
+        with self._lock:
+            return self._force_xyz.copy()
+
+    def get_xy_corrected(self):
+        """ترجع القوة XY بعد طرح الـstatic bias (بدون حساب magnitude)."""
+        with self._lock:
+            f = self._force_xyz - self._bias_xyz
+        return np.array([f[0], f[1]], dtype=float)
+
     def get_xy_magnitude(self):
         with self._lock:
             f = self._force_xyz - self._bias_xyz
@@ -259,7 +286,7 @@ def probe_linear(move_group, force_monitor, direction_xy,
         PROBE_SPEED_SCALE, PROBE_ACCEL_SCALE,
         "iterative_time_parameterization")
  
-    rospy.loginfo("  [probe] zeroing force bias ...")
+    rospy.loginfo("  [probe] zeroing force bias (static) ...")
     force_monitor.zero_bias()
  
     rospy.loginfo(f"  [probe] moving: dir=({d[0]:+.2f},{d[1]:+.2f}), "
@@ -271,24 +298,83 @@ def probe_linear(move_group, force_monitor, direction_xy,
     consec = 0
     t0 = rospy.Time.now()
     timeout = 30.0
+
+    # --- مرحلة 1: warm-up ---
+    # نتجاهل أول PROBE_WARMUP_SKIP (مرحلة التسارع)، ثم نجمع عينات خام خلال
+    # الحركة الثابتة ونحسب منها bias أولي.
+    rospy.loginfo("  [probe] warm-up: initial bias estimation during motion ...")
+    warmup_samples = []
+    warmed = False
+    fmag_max = 0.0
+
+    # --- مرحلة 2: sliding baseline (EMA) ---
+    # بعد الـ warm-up، نحدث الـ bias باستمرار طالما القوة هادية.
+    # هذا يتعامل مع القوى التقديرية اللي بتتغير مع الـ joint configuration
+    # (مثلاً لما الذراع يمتد بعيد). بس أول ما القوة تعدي نصف العتبة، نجمّد
+    # الـbias عشان الـcontact الحقيقي ما يبلعه الـEMA.
+    baseline_xy = np.zeros(2)
+    baseline_inited = False
+    freeze_thresh = force_threshold * PROBE_EMA_FREEZE_FRAC
+    alpha = PROBE_EMA_ALPHA
+
     while not rospy.is_shutdown() and (rospy.Time.now() - t0).to_sec() < timeout:
-        fmag = force_monitor.get_xy_magnitude()
         cur_now = move_group.get_current_pose().pose
         traveled = np.hypot(cur_now.position.x - start[0],
                             cur_now.position.y - start[1])
+
+        if not warmed:
+            # اجمع عينات فقط بعد ما نتجاوز مرحلة التسارع
+            if traveled >= PROBE_WARMUP_SKIP:
+                warmup_samples.append(force_monitor.get_raw_xyz())
+            if (traveled >= PROBE_WARMUP_TRAVEL and
+                    len(warmup_samples) >= PROBE_WARMUP_SAMPLES):
+                new_bias = np.mean(warmup_samples, axis=0)
+                force_monitor.set_bias(new_bias)
+                # ابدأ sliding baseline على القيم المطروح منها الـbias (~0)
+                baseline_xy = np.zeros(2)
+                baseline_inited = True
+                rospy.loginfo(f"  [probe] warm-up done: {len(warmup_samples)} "
+                              f"samples, traveled={traveled*1000:.1f}mm, "
+                              f"sliding baseline ON (alpha={alpha}, "
+                              f"freeze>{freeze_thresh:.2f}N)")
+                warmed = True
+            if np.hypot(target_xy[0]-cur_now.position.x,
+                        target_xy[1]-cur_now.position.y) < 0.002:
+                rospy.logwarn("  [probe] reached max_travel during warm-up "
+                              "(increase max_travel or reduce warm-up distance)")
+                break
+            rate.sleep()
+            continue
+
+        # --- مرحلة الكشف عن التلامس مع sliding baseline ---
+        # القوى المطروح منها الـstatic bias (من set_bias فوق)
+        f_xy = force_monitor.get_xy_corrected()
+        # القوة الصافية = القراءة - sliding baseline
+        residual_xy = f_xy - baseline_xy
+        fmag = float(np.hypot(residual_xy[0], residual_xy[1]))
+        if fmag > fmag_max:
+            fmag_max = fmag
+
+        # حدّث baseline فقط لما القوة الصافية هادية (تحت freeze_thresh)
+        if fmag < freeze_thresh:
+            baseline_xy = (1.0 - alpha) * baseline_xy + alpha * f_xy
+
         if fmag > force_threshold and traveled > PROBE_MIN_TRAVEL:
             consec += 1
             if consec >= PROBE_CONTACT_CONSEC:
                 move_group.stop()
                 rospy.loginfo(f"  [probe] CONTACT! |F_xy|={fmag:.2f} N "
+                              f"(max so far={fmag_max:.2f} N) "
                               f"traveled={traveled*1000:.1f}mm")
                 contact = True
                 break
         else:
             consec = 0
+
         if np.hypot(target_xy[0]-cur_now.position.x,
                     target_xy[1]-cur_now.position.y) < 0.002:
-            rospy.logwarn("  [probe] reached max_travel without contact")
+            rospy.logwarn(f"  [probe] reached max_travel without contact "
+                          f"(max |F_xy|={fmag_max:.2f} N)")
             break
         rate.sleep()
  
