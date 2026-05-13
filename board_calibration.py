@@ -303,12 +303,18 @@ class BoardCalibration:
             p = corner + u_promo * eh + v * eN
             promo[letter] = (float(p[0]), float(p[1]), ORIGIN_Z)
 
+        # ترتيب الـgraveyard: row-major يبلش من الصف الأقرب للروبوت.
+        # row_g=0 هو الصف الأقرب للروبوت، col_g=0 العمود الأقرب لحافة اللوحة.
+        # فالمؤشرات:
+        #   x0  x1  x2   ← أقرب صف للروبوت (3 أعمدة)
+        #   x3  x4  x5   ← الصف اللي بعده
+        #   ...
+        #   x21 x22 x23  ← أبعد صف عن الروبوت
         graves = []
-        for col_g in range(3):
-            # col_g=0 هو العمود الأقرب لحافة اللوحة، والأبعد لـcol_g=2
-            u = board_u_far + (col_g + 0.5) * SQUARE_SIZE
-            for row_g in range(8):
-                v = MARGIN + (7.5 - row_g) * SQUARE_SIZE
+        for row_g in range(8):
+            v = MARGIN + (7.5 - row_g) * SQUARE_SIZE
+            for col_g in range(3):
+                u = board_u_far + (col_g + 0.5) * SQUARE_SIZE
                 p = corner + u * eh + v * eN
                 graves.append((float(p[0]), float(p[1]), ORIGIN_Z))
 
