@@ -11,6 +11,14 @@ from geometry_msgs.msg import Pose, Quaternion
 from tf.transformations import quaternion_from_euler
 from franka_gripper.msg import GraspAction, GraspGoal, MoveAction, MoveGoal
 
+# --- ناخذ مواقع اللوحة والزاوية والـhome من ملف المعايرة المحفوظ ---
+from board_calibration_p1 import (
+    BoardCalibration,
+    init_tf,
+    get_current_pose_in_ref,
+    REFERENCE_FRAME,
+)
+
 travel_h = 0.18 
 safe_h=0.1
 pick_h = 0.047
@@ -19,22 +27,10 @@ ac=1
 vg=0.6
 ag=0.6
 
-origin_x, origin_y, origin_z = 0.3981098174137588, -6.41297277950631e-05,0  #x>=0.3
-square_size = 0.045 
-square_positions = {}
-
-for col_idx, col in enumerate('abcdefgh'):
-    for row in range(1, 9):
-        x = origin_x + (row-1)*square_size      
-        y = origin_y - col_idx*square_size  
-        z = origin_z
-        square_positions[f"{col}{row}"] = (x, y, z)
-        
-#home position
-hx , hy, _= square_positions["a1"]
-hx = hx - 0.1 
-hy = hy + 0.3 
-hz = z
+# حالة اللوحة: تنشأ فارغة هنا وتُعبّأ من YAML عبر board.load() في main()
+# بعدها: board.square_positions, board.mirrored_squares,
+#         board.hx/hy/hz, board.board_theta
+board = BoardCalibration()
 
 
 
@@ -91,13 +87,13 @@ def gripper_grasp(grasp_client, width=0.015, force=8, speed=0.1,
 
 
 
-def move_to_pose(move_group, x, y, z, vf,af, cartesian=True):
+def move_to_pose(move_group, x, y, z, vf,af, cartesian=True, yaw=0.0):
     pose = Pose()
     pose.position.x = float(x)
     pose.position.y = float(y)
     pose.position.z = float(z)
 
-    q = quaternion_from_euler(np.pi, 0.0, 0.0)
+    q = quaternion_from_euler(np.pi, 0.0, float(yaw))
     pose.orientation = Quaternion(*q)
 
     if cartesian:
@@ -140,7 +136,8 @@ def arc_move(move_group,
                        arc_extra=0.2,
                        vf=1, af=1,
                        N_up=10, N_curve=40, N_down=10,
-                       eef_step=0.01):
+                       eef_step=0.01,
+                       yaw=0.0):
 
     import copy, rospy
     import numpy as np
@@ -148,7 +145,7 @@ def arc_move(move_group,
     from tf.transformations import quaternion_from_euler
 
    
-    q = quaternion_from_euler(np.pi, 0.0, 0.0)
+    q = quaternion_from_euler(np.pi, 0.0, float(yaw))
     ori = Quaternion(*q)
 
     sx, sy, ex, ey = float(sx), float(sy), float(ex), float(ey)
@@ -166,7 +163,7 @@ def arc_move(move_group,
     waypoints = []
 
    
-    cur = move_group.get_current_pose().pose
+    cur = get_current_pose_in_ref(move_group)
     cur.orientation = ori
     waypoints.append(copy.deepcopy(cur))
 
@@ -245,41 +242,46 @@ def move_piece(move_group, grasp_client, move_client, move_text):
 
     start_square = move_text[:2].lower()
     end_square = move_text[2:].lower()
-    
-    sx, sy, _ = square_positions[start_square]
-    ex, ey, _ = square_positions[end_square]
-    
-   
-    
+
+    # المواقع ياتون من board (محمّل من YAML). نستخدم mirrored_squares
+    # للحفاظ على نفس سلوك السكربت القديم.
+    sq_map = board.mirrored_squares if board.mirrored_squares else board.square_positions
+    sx, sy, _ = sq_map[start_square]
+    ex, ey, _ = sq_map[end_square]
+
+    # home + board yaw من ملف المعايرة
+    hx, hy, hz = board.hx, board.hy, board.hz
+    yaw = float(board.board_theta)
+
     rospy.loginfo(f"Executing move: {start_square} -> {end_square}")
     gripper_close_full(move_client)
 
 
 
-    move_to_pose(move_group, hx, hy, safe_h, vc, ac, cartesian=True)
-    arc_move(move_group, hx, hy, sx, sy,safe_h,travel_h )
+    move_to_pose(move_group, hx, hy, safe_h, vc, ac, cartesian=True, yaw=yaw)
+    arc_move(move_group, hx, hy, sx, sy, safe_h, travel_h, yaw=yaw)
 
     gripper_open(move_client)
-    move_to_pose(move_group, sx, sy, pick_h, vg, ag, cartesian=True)
-    
+    move_to_pose(move_group, sx, sy, pick_h, vg, ag, cartesian=True, yaw=yaw)
+
     gripper_grasp(grasp_client)
-  
+
     rospy.sleep(0.1)
 
 
  
-    arc_move(move_group, sx, sy, ex, ey,pick_h,travel_h )
+    arc_move(move_group, sx, sy, ex, ey, pick_h, travel_h, yaw=yaw)
 
 
 
-   #move_to_pose(move_group, ex, ey, pick_h, vg, ag, cartesian=True)
+   #move_to_pose(move_group, ex, ey, pick_h, vg, ag, cartesian=True, yaw=yaw)
     gripper_open(move_client)
     rospy.sleep(0.5)
 
 
-    move_to_pose(move_group, ex, ey, safe_h, vg, ag, cartesian=True)
+    move_to_pose(move_group, ex, ey, safe_h, vg, ag, cartesian=True, yaw=yaw)
     gripper_close_full(move_client)
-    arc_move(move_group, ex, ey, hx, hy,safe_h,travel_h ) 
+    arc_move(move_group, ex, ey, hx, hy, safe_h, travel_h, yaw=yaw)
     move_group.clear_pose_targets()
     #move_group.go(wait=True)
     #move_group.stop()
@@ -291,14 +293,29 @@ def main():
     moveit_commander.roscpp_initialize(sys.argv)
     rospy.init_node('chessrobot_p2', anonymous=False)
 
+    # TF listener لازم عشان get_current_pose يتحول الى REFERENCE_FRAME
+    init_tf()
+
     # التعديل الجوهري هنا:
     arm = moveit_commander.MoveGroupCommander(
     "panda1_manipulator",
     robot_description="/panda1/robot_description",
     ns="/panda1"
 )
+    # نفس الإطار المرجعي المستخدم في المعايرة (world)
+    arm.set_pose_reference_frame(REFERENCE_FRAME)
     arm.set_max_velocity_scaling_factor(1)
     arm.set_max_acceleration_scaling_factor(1)
+
+    # تحميل المعايرة المحفوظة (corner, theta, e_h, e_N) وبناء المربعات/home
+    if not board.load():
+        rospy.logerr("No saved calibration found. Run board calibration first.")
+        moveit_commander.roscpp_shutdown()
+        return
+
+    rospy.loginfo(f"Loaded calibration:")
+    rospy.loginfo(f"  home  = ({board.hx:+.4f}, {board.hy:+.4f}, {board.hz:+.4f})")
+    rospy.loginfo(f"  theta = {np.degrees(board.board_theta):+.3f} deg")
 
     grasp_client, move_client = init_gripper_clients()
     
