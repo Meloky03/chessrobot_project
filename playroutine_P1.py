@@ -15,6 +15,7 @@ from franka_gripper.msg import GraspAction, GraspGoal, MoveAction, MoveGoal
 from board_calibration_p1 import (
     BoardCalibration,
     init_tf,
+    get_current_pose_in_ref,
     REFERENCE_FRAME,
 )
 
@@ -162,7 +163,7 @@ def arc_move(move_group,
     waypoints = []
 
    
-    cur = move_group.get_current_pose().pose
+    cur = get_current_pose_in_ref(move_group)
     cur.orientation = ori
     waypoints.append(copy.deepcopy(cur))
 

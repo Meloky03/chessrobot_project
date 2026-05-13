@@ -94,6 +94,11 @@ S_PROBE_DIR = (+1.0, 0.0)
 S_PROBE_YAW = 0.0
 
 
+# --- home: ثابت فيزيائياً جنب h8 (من الجهة اليسار لو واقف بمكان الاسود) ---
+# يُحسب في board frame (e_h, e_N) عشان ما يتأثر بدوران اللوحة theta.
+HOME_EH_OFFSET = 0.10   # ابعد عن اللوحة بهالاتجاه (موجب e_h = بعد h-file)
+HOME_EN_OFFSET = 0.0   # محاذاة طول اللوحة (0 = صف h8 تقريباً)
+
 CALIB_FILE = os.path.expanduser("~/board_calibration.yaml")
 
 
@@ -330,9 +335,19 @@ class BoardCalibration:
             for i in range(len(original_keys))
         }
 
-        base_hx, base_hy, _ = self.square_positions["h8"]
-        self.hx = base_hx - 0.1
-        self.hy = base_hy + 0.3
+        # --- home: ثابتة فيزيائياً جنب h8 من جهة "اليسار" ---
+        # نحسبها في الاطار المحلي للوحة (board frame) مو في world frame
+        # عشان موقعها يضل ثابت بغض النظر عن دوران اللوحة (theta) او
+        # عن لون اللاعب. الازاحة هنا:
+        #   +HOME_EH_OFFSET على محور e_h (بعد h-file، يعني يسار h8 لو
+        #     واقف من جهة الاسود)
+        #   +HOME_EN_OFFSET على محور e_N (نفس الصف h8 تقريباً)
+        h8_pos = np.array(self.square_positions["h8"][:2])
+        home_xy = (h8_pos
+                   + HOME_EH_OFFSET * self.e_h_axis
+                   + HOME_EN_OFFSET * self.e_N_axis)
+        self.hx = float(home_xy[0])
+        self.hy = float(home_xy[1])
         self.hz = SAFE_H
 
     # ------------------------------------------------------------------
