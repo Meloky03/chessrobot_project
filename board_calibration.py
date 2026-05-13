@@ -286,7 +286,12 @@ class BoardCalibration:
                 p = corner + u * eh + v * eN
                 sq_pos[f"{col}{row}"] = (float(p[0]), float(p[1]), ORIGIN_Z)
 
-        u_promo = MARGIN - 0.01 - 3.5 * SQUARE_SIZE
+        # promotion + graveyard على الجهة الثانية من اللوحة (بعد h-file)،
+        # دائماً ثابتات فيزيائياً بغض النظر عن لون اللاعب.
+        # يمين الروبوت، بتبلش من الصف الأقرب للروبوت (row_g=0 ⇒ v=7.5*SQ).
+        board_u_far = MARGIN + 8 * SQUARE_SIZE + 0.01  # بعد حافة اللوحة بـ1cm
+
+        u_promo = board_u_far + 3.5 * SQUARE_SIZE
         v_by_letter = {
             'q': MARGIN + 7.5 * SQUARE_SIZE,
             'r': MARGIN + 6.5 * SQUARE_SIZE,
@@ -300,7 +305,8 @@ class BoardCalibration:
 
         graves = []
         for col_g in range(3):
-            u = MARGIN - 0.01 - (col_g + 0.5) * SQUARE_SIZE
+            # col_g=0 هو العمود الأقرب لحافة اللوحة، والأبعد لـcol_g=2
+            u = board_u_far + (col_g + 0.5) * SQUARE_SIZE
             for row_g in range(8):
                 v = MARGIN + (7.5 - row_g) * SQUARE_SIZE
                 p = corner + u * eh + v * eN
