@@ -288,33 +288,34 @@ class BoardCalibration:
 
         # promotion + graveyard على الجهة الثانية من اللوحة (بعد h-file)،
         # دائماً ثابتات فيزيائياً بغض النظر عن لون اللاعب.
-        # يمين الروبوت، بتبلش من الصف الأقرب للروبوت (row_g=0 ⇒ v=7.5*SQ).
+        # الترتيب يبلش من الصف الأول (h1 side) ومحاذٍ للوحة.
         board_u_far = MARGIN + 8 * SQUARE_SIZE + 0.01  # بعد حافة اللوحة بـ1cm
 
+        # promotion: pq جنب h1، pr جنب h2، pb جنب h3، pn جنب h4
         u_promo = board_u_far + 3.5 * SQUARE_SIZE
         v_by_letter = {
-            'q': MARGIN + 7.5 * SQUARE_SIZE,
-            'r': MARGIN + 6.5 * SQUARE_SIZE,
-            'b': MARGIN + 5.5 * SQUARE_SIZE,
-            'n': MARGIN + 4.5 * SQUARE_SIZE,
+            'q': MARGIN + 0.5 * SQUARE_SIZE,  # جنب h1
+            'r': MARGIN + 1.5 * SQUARE_SIZE,  # جنب h2
+            'b': MARGIN + 2.5 * SQUARE_SIZE,  # جنب h3
+            'n': MARGIN + 3.5 * SQUARE_SIZE,  # جنب h4
         }
         promo = {}
         for letter, v in v_by_letter.items():
             p = corner + u_promo * eh + v * eN
             promo[letter] = (float(p[0]), float(p[1]), ORIGIN_Z)
 
-        # ترتيب الـgraveyard: row-major يبلش من الصف الأقرب للروبوت.
-        # row_g=0 هو الصف الأقرب للروبوت، col_g=0 العمود الأقرب لحافة اللوحة.
+        # graveyard: column-major. كل عمود فيه 8 مواقع من h1-side (row_g=0)
+        # لـh8-side (row_g=7). col_g=0 هو العمود الملاصق للوحة.
         # فالمؤشرات:
-        #   x0  x1  x2   ← أقرب صف للروبوت (3 أعمدة)
-        #   x3  x4  x5   ← الصف اللي بعده
+        #   x0  جنب h1  |  x8  (نفس الصف بالعمود2)  |  x16 (العمود3)
+        #   x1  جنب h2  |  x9                       |  x17
         #   ...
-        #   x21 x22 x23  ← أبعد صف عن الروبوت
+        #   x7  جنب h8  |  x15                      |  x23
         graves = []
-        for row_g in range(8):
-            v = MARGIN + (7.5 - row_g) * SQUARE_SIZE
-            for col_g in range(3):
-                u = board_u_far + (col_g + 0.5) * SQUARE_SIZE
+        for col_g in range(3):
+            u = board_u_far + (col_g + 0.5) * SQUARE_SIZE
+            for row_g in range(8):
+                v = MARGIN + (0.5 + row_g) * SQUARE_SIZE
                 p = corner + u * eh + v * eN
                 graves.append((float(p[0]), float(p[1]), ORIGIN_Z))
 
