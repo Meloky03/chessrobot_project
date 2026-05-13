@@ -31,7 +31,7 @@ from franka_msgs.msg import FrankaState
 # panda1 هو الذراع اللي بيتحرك فعليا، لكن الاحداثيات كلها محسوبة
 # في اطار panda2_link0. لازم يكون TF بين panda1_link0 و panda2_link0
 # موجود في الـTF tree (من الـURDF المشترك أو static_transform_publisher).
-REFERENCE_FRAME = "panda2_link0"
+REFERENCE_FRAME = "panda1_link0"
 
 # TF globals (تتملا في manual_control)
 tf_buffer = None
