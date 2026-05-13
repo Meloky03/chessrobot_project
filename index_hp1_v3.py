@@ -16,12 +16,26 @@ import moveit_commander
 import numpy as np
 import yaml
 import actionlib
+import tf2_ros
+import tf2_geometry_msgs  # لازم للـPoseStamped.transform()
  
 from std_msgs.msg import String
-from geometry_msgs.msg import Pose, Quaternion
+from geometry_msgs.msg import Pose, PoseStamped, Quaternion
 from tf.transformations import quaternion_from_euler
 from franka_gripper.msg import MoveAction, MoveGoal
 from franka_msgs.msg import FrankaState
+
+# =====================================================================
+# --- الاطار المرجعي ---
+# =====================================================================
+# panda1 هو الذراع اللي بيتحرك فعليا، لكن الاحداثيات كلها محسوبة
+# في اطار panda2_link0. لازم يكون TF بين panda1_link0 و panda2_link0
+# موجود في الـTF tree (من الـURDF المشترك أو static_transform_publisher).
+REFERENCE_FRAME = "world"
+
+# TF globals (تتملا في manual_control)
+tf_buffer = None
+tf_listener = None
  
 # =====================================================================
 # --- متغيرات التحكم العالمية ---
@@ -204,6 +218,28 @@ def _rot_2d(v, angle):
     c, s = np.cos(angle), np.sin(angle)
     return np.array([c*v[0] - s*v[1], s*v[0] + c*v[1]])
 
+def get_current_pose_in_ref(move_group, timeout=1.0):
+    """
+    ترجع الـcurrent pose في REFERENCE_FRAME (panda2_link0) بدل الـplanning
+    frame (panda1_link0). ده مهم لأن move_group.get_current_pose() بترجع
+    دايما في الـplanning frame حتى لو عينا set_pose_reference_frame.
+
+    ترجع: geometry_msgs/Pose (بدون header)
+    """
+    ps_planning = move_group.get_current_pose()   # PoseStamped في planning frame
+    if tf_buffer is None:
+        # لسه ما اتعملش init - ممكن أثناء testing بدون ROS
+        return ps_planning.pose
+    try:
+        ps_ref = tf_buffer.transform(ps_planning, REFERENCE_FRAME,
+                                     rospy.Duration(timeout))
+        return ps_ref.pose
+    except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+            tf2_ros.ExtrapolationException) as e:
+        rospy.logerr(f"get_current_pose_in_ref: TF transform failed: {e}")
+        # fallback: نرجع الـplanning frame pose (أحسن من crash)
+        return ps_planning.pose
+
 def _make_down_pose(x, y, z, yaw):
     pose = Pose()
     pose.position.x, pose.position.y, pose.position.z = float(x), float(y), float(z)
@@ -254,7 +290,7 @@ def gripper_full_close(move_client, speed=None):
 def probe_linear(move_group, force_monitor, direction_xy,
                  max_travel=PROBE_MAX_TRAVEL,
                  force_threshold=PROBE_FORCE_THRESH):
-    cur = move_group.get_current_pose().pose
+    cur = get_current_pose_in_ref(move_group)
     start = np.array([cur.position.x, cur.position.y])
     z = cur.position.z
  
@@ -292,7 +328,7 @@ def probe_linear(move_group, force_monitor, direction_xy,
     timeout = 30.0
     while not rospy.is_shutdown() and (rospy.Time.now() - t0).to_sec() < timeout:
         fmag = force_monitor.get_xy_magnitude()
-        cur_now = move_group.get_current_pose().pose
+        cur_now = get_current_pose_in_ref(move_group)
         traveled = np.hypot(cur_now.position.x - start[0],
                             cur_now.position.y - start[1])
         if fmag > force_threshold and traveled > PROBE_MIN_TRAVEL:
@@ -317,7 +353,7 @@ def probe_linear(move_group, force_monitor, direction_xy,
         return None
  
     rospy.sleep(0.25)
-    final = move_group.get_current_pose().pose
+    final = get_current_pose_in_ref(move_group)
     return np.array([final.position.x, final.position.y])
  
 # =====================================================================
@@ -337,7 +373,7 @@ def _do_probe(arm, force_monitor, gripper_client,
         rospy.loginfo("  [probe] full-closing gripper before probe")
         gripper_full_close(gripper_client)
 
-    cur = arm.get_current_pose().pose
+    cur = get_current_pose_in_ref(arm)
     move_to_pose(arm, cur.position.x, cur.position.y, PROBE_TRANSIT_Z,
                  v_slow, a_slow, yaw=probe_yaw)
 
@@ -356,7 +392,7 @@ def _do_probe(arm, force_monitor, gripper_client,
     if contact is None:
         rospy.logerr(f"{name}: no contact detected within "
                      f"{PROBE_MAX_TRAVEL*1000:.0f}mm.")
-        cur = arm.get_current_pose().pose
+        cur = get_current_pose_in_ref(arm)
         move_to_pose(arm, cur.position.x, cur.position.y, PROBE_TRANSIT_Z,
                      v_slow, a_slow, yaw=probe_yaw)
         return None
@@ -605,13 +641,37 @@ def test_calibration(arm):
 # --- حلقة التحكم اليدوي ---
 # =====================================================================
 def manual_control():
+    global tf_buffer, tf_listener
+
     moveit_commander.roscpp_initialize(sys.argv)
     rospy.init_node('manual_robot_control_globals', anonymous=True)
- 
+
+    # --- TF listener لتحويل get_current_pose() من panda1_link0 -> panda2_link0
+    tf_buffer = tf2_ros.Buffer()
+    tf_listener = tf2_ros.TransformListener(tf_buffer)
+    rospy.loginfo("Waiting for TF: panda1_link0 <-> panda2_link0 ...")
+    try:
+        tf_buffer.can_transform(REFERENCE_FRAME, "panda1_link0",
+                                rospy.Time(0), rospy.Duration(5.0))
+        rospy.loginfo(f"  TF available: panda1_link0 -> {REFERENCE_FRAME}")
+    except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+            tf2_ros.ExtrapolationException) as e:
+        rospy.logerr(f"  TF NOT available: {e}")
+        rospy.logerr("  Check that static_transform_publisher or URDF "
+                     "defines the link between panda1_link0 and panda2_link0.")
+
     arm = moveit_commander.MoveGroupCommander(
         "panda1_manipulator",
         robot_description="/panda1/robot_description",
         ns="/panda1")
+
+    # --- ضبط الاطار المرجعي: كل الـposes اللي هنبعتها لـMoveIt
+    #     هتتفسر في panda2_link0 بدل panda1_link0 (الـplanning frame).
+    rospy.loginfo(f"Setting pose reference frame to: {REFERENCE_FRAME}")
+    arm.set_pose_reference_frame(REFERENCE_FRAME)
+    rospy.loginfo(f"  planning frame (base) : {arm.get_planning_frame()}")
+    rospy.loginfo(f"  pose reference frame  : {arm.get_pose_reference_frame()}")
+
     gripper_client = actionlib.SimpleActionClient(
         '/panda1/franka_gripper/move', MoveAction)
     gripper_client.wait_for_server()
