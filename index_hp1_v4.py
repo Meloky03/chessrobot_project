@@ -110,7 +110,8 @@ def manual_control():
         if cmd == 'ready':
             arm.set_named_target('ready'); arm.go(wait=True); continue
         if cmd == 'home':
-            move_to_pose(arm, board.hx, board.hy, board.hz, V_SLOW, A_SLOW)
+            move_to_pose(arm, board.hx, board.hy, board.hz,
+                         V_SLOW, A_SLOW, yaw=board.board_theta)
             continue
 
         # --- المعايرة + حفظ/تحميل/عرض/اختبار ---
@@ -148,7 +149,7 @@ def manual_control():
 
         if target_pos is not None:
             move_to_pose(arm, target_pos[0], target_pos[1], SAFE_H,
-                         V_SLOW, A_SLOW)
+                         V_SLOW, A_SLOW, yaw=board.board_theta)
         else:
             print("Invalid Input!")
 

@@ -659,7 +659,9 @@ class BoardCalibration:
         for sq in ('a1', 'h1', 'h8', 'a8'):
             p = self.mirrored_squares[sq]
             rospy.loginfo(f"  test -> {sq} @ ({p[0]:+.4f}, {p[1]:+.4f})")
-            move_to_pose(arm, p[0], p[1], safe_h, V_SLOW, A_SLOW)
+            move_to_pose(arm, p[0], p[1], safe_h,
+                         V_SLOW, A_SLOW, yaw=self.board_theta)
             rospy.sleep(0.3)
         rospy.loginfo("  test -> home")
-        move_to_pose(arm, self.hx, self.hy, self.hz, V_SLOW, A_SLOW)
+        move_to_pose(arm, self.hx, self.hy, self.hz,
+                     V_SLOW, A_SLOW, yaw=self.board_theta)
