@@ -46,8 +46,8 @@ PROBE_MAX_TRAVEL   = 0.4
 PROBE_RETREAT      = 0.020
 PROBE_POST_LIFT    = 0.010
 PROBE_TRANSIT_Z    = safe_h + 0.080
-PROBE_FORCE_THRESH   = 5.0   # عتبة W probes (الافتراضية)
-PROBE_FORCE_THRESH_S = 5   # عتبة S probes - اقل عشان يحس باللمسة بسرعة
+PROBE_FORCE_THRESH   = 4   # عتبة W probes (الافتراضية)
+PROBE_FORCE_THRESH_S = 4   # عتبة S probes - اقل عشان يحس باللمسة بسرعة
                               # ويوقف فورا بدل ما يضغط على اللوحة
 PROBE_BIAS_SAMPLES = 50
 PROBE_BIAS_RATE_HZ = 100
