@@ -84,12 +84,12 @@ GRIPPER_TIP_OFFSET = (0.018 / 2) - 0.00
 
 # --- نقاط بدء الـprobing ---
 W1_START_XY = (0.50,  0.20)
-W2_START_XY = (0.52,  0.20)
+W2_START_XY = (0.55,  0.20)
 W_PROBE_DIR = (0.0, -1.0)
 W_PROBE_YAW = np.pi / 2.0
 
 S1_START_XY = (0.30, -0.20)
-S2_START_XY = (0.30, -0.22)
+S2_START_XY = (0.30, -0.25)
 S_PROBE_DIR = (+1.0, 0.0)
 S_PROBE_YAW = 0.0
 
@@ -353,11 +353,16 @@ class BoardCalibration:
     def _probe_linear(self, move_group, force_monitor, direction_xy,
                       max_travel=PROBE_MAX_TRAVEL,
                       force_threshold=PROBE_FORCE_THRESH):
+        """
+        يتحرك خطياً حتى يلامس عقبة (يقاس من |F_xy|).
+        يرجع (نقطة التلامس [x, y], delta_yaw_settled) أو None.
+        delta_yaw_settled = الفرق بين yaw الفعلي بعد الاستقرار و yaw البداية.
+        """
         cur = get_current_pose_in_ref(move_group)
         start = np.array([cur.position.x, cur.position.y])
         z = cur.position.z
 
-        # --- DIAG: yaw قبل البدء (nominal) ---
+        # --- yaw قبل البدء (nominal) ---
         yaw_start = _yaw_from_pose(cur)
 
         d = np.asarray(direction_xy, dtype=float)
@@ -420,7 +425,7 @@ class BoardCalibration:
         if not contact:
             return None
 
-        # --- DIAG: yaw لحظة التلامس (تحت الحمل) ---
+        # --- yaw لحظة التلامس (تحت الحمل) ---
         cur_loaded = get_current_pose_in_ref(move_group)
         yaw_loaded = _yaw_from_pose(cur_loaded)
         d_yaw_loaded = _wrap_angle(yaw_loaded - yaw_start)
@@ -434,7 +439,7 @@ class BoardCalibration:
 
         rospy.sleep(0.25)
 
-        # --- DIAG: yaw بعد الاستقرار ---
+        # --- yaw بعد الاستقرار ---
         final = get_current_pose_in_ref(move_group)
         yaw_settled = _yaw_from_pose(final)
         d_yaw_settled = _wrap_angle(yaw_settled - yaw_start)
