@@ -450,12 +450,15 @@ class BoardCalibration:
             rospy.logwarn(f"  [probe][DIAG] LARGE wrist deflection: "
                           f"{np.degrees(d_yaw_settled):+.3f} deg")
 
-        return np.array([final.position.x, final.position.y])
+        # ترجع نقطة التلامس + delta_yaw للاستخدام في تصحيح الـoffset
+        return np.array([final.position.x, final.position.y]), float(d_yaw_settled)
 
     def _do_probe(self, arm, force_monitor, gripper_client,
                   name, start_xy, direction, probe_yaw,
                   force_threshold=PROBE_FORCE_THRESH):
-        """approach + touch + retreat. ترجع نقطة التلامس أو None."""
+        """approach + touch + retreat.
+        ترجع (نقطة التلامس, delta_yaw_settled) أو None.
+        """
         rospy.loginfo(f"[Probe] {name}")
 
         if gripper_client is not None:
@@ -475,10 +478,10 @@ class BoardCalibration:
         move_to_pose(arm, start_xy[0], start_xy[1], PROBE_Z,
                      V_SLOW, A_SLOW, yaw=probe_yaw)
 
-        contact = self._probe_linear(arm, force_monitor, direction,
-                                     max_travel=PROBE_MAX_TRAVEL,
-                                     force_threshold=force_threshold)
-        if contact is None:
+        result = self._probe_linear(arm, force_monitor, direction,
+                                    max_travel=PROBE_MAX_TRAVEL,
+                                    force_threshold=force_threshold)
+        if result is None:
             rospy.logerr(f"{name}: no contact detected within "
                          f"{PROBE_MAX_TRAVEL*1000:.0f}mm.")
             cur = get_current_pose_in_ref(arm)
@@ -486,6 +489,7 @@ class BoardCalibration:
                          V_SLOW, A_SLOW, yaw=probe_yaw)
             return None
 
+        contact, d_yaw = result
         rospy.loginfo(f"  contact @ ({contact[0]:+.4f}, {contact[1]:+.4f})")
 
         d_norm = np.asarray(direction, dtype=float)
@@ -502,7 +506,7 @@ class BoardCalibration:
         move_to_pose(arm, back_xy[0], back_xy[1], PROBE_TRANSIT_Z,
                      V_SLOW, A_SLOW, yaw=probe_yaw)
 
-        return contact
+        return contact, d_yaw
 
     # ------------------------------------------------------------------
     # --- المعايرة الرئيسية (Two-pass) ---
@@ -525,21 +529,32 @@ class BoardCalibration:
                 rospy.loginfo("Calibration aborted by user.")
                 return False
 
+        # --- يسأل المستخدم اذا يطبق تصحيح انحراف الـwrist ---
+        ans_def = input("Apply wrist-deflection correction? [y/N]: "
+                        ).strip().lower()
+        use_deflection_corr = (ans_def == 'y')
+        if use_deflection_corr:
+            rospy.loginfo(">>> Wrist-deflection correction: ENABLED")
+        else:
+            rospy.loginfo(">>> Wrist-deflection correction: DISABLED (legacy)")
+
         # =============================================================
         # PASS 1: W1 + W2 بـyaw الاصلي لتقدير θ
         # =============================================================
         rospy.loginfo(">>> PASS 1: estimating board angle from W1 & W2")
-        W1_p1 = self._do_probe(arm, force_monitor, gripper_client,
-                               "W1 (pass1)", W1_START_XY,
-                               W_PROBE_DIR, W_PROBE_YAW)
-        if W1_p1 is None:
+        res = self._do_probe(arm, force_monitor, gripper_client,
+                             "W1 (pass1)", W1_START_XY,
+                             W_PROBE_DIR, W_PROBE_YAW)
+        if res is None:
             return False
+        W1_p1, _ = res
 
-        W2_p1 = self._do_probe(arm, force_monitor, gripper_client,
-                               "W2 (pass1)", W2_START_XY,
-                               W_PROBE_DIR, W_PROBE_YAW)
-        if W2_p1 is None:
+        res = self._do_probe(arm, force_monitor, gripper_client,
+                             "W2 (pass1)", W2_START_XY,
+                             W_PROBE_DIR, W_PROBE_YAW)
+        if res is None:
             return False
+        W2_p1, _ = res
 
         dW = W2_p1 - W1_p1
         theta_est = float(np.arctan2(dW[1], dW[0]))
@@ -569,15 +584,18 @@ class BoardCalibration:
 
         contacts = []
         probe_dirs = []
+        delta_yaws = []
         for name, start_xy, direction, probe_yaw, thresh in probes_p2:
-            contact = self._do_probe(arm, force_monitor, gripper_client,
-                                     name, start_xy, direction, probe_yaw,
-                                     force_threshold=thresh)
-            if contact is None:
+            res = self._do_probe(arm, force_monitor, gripper_client,
+                                 name, start_xy, direction, probe_yaw,
+                                 force_threshold=thresh)
+            if res is None:
                 rospy.logerr(f"{name}: aborting calibration.")
                 return False
+            contact, d_yaw = res
             contacts.append(contact)
             probe_dirs.append(direction / np.linalg.norm(direction))
+            delta_yaws.append(d_yaw)
 
         W1, W2, S1, S2 = contacts
 
@@ -602,14 +620,28 @@ class BoardCalibration:
         eN_fix = np.array([-eh_avg[1], eh_avg[0]])
 
         # --- تصحيح نقاط التلامس بازاحة نصف عرض الجريبر ---
-        rospy.loginfo(f"Applying gripper tip offset = "
-                      f"{GRIPPER_TIP_OFFSET*1000:.1f} mm to contacts")
+        # لو use_deflection_corr=True، اتجاه الـoffset يتدور بـdelta_yaw
+        # المقاس فعلياً عند كل probe (بدل الاعتماد على الاتجاه الـnominal).
+        if use_deflection_corr:
+            rospy.loginfo(f"Applying gripper tip offset = "
+                          f"{GRIPPER_TIP_OFFSET*1000:.1f} mm to contacts "
+                          f"(WITH wrist-deflection correction)")
+            offset_dirs = [_rot_2d(d, dy)
+                           for d, dy in zip(probe_dirs, delta_yaws)]
+        else:
+            rospy.loginfo(f"Applying gripper tip offset = "
+                          f"{GRIPPER_TIP_OFFSET*1000:.1f} mm to contacts "
+                          f"(legacy: nominal direction)")
+            offset_dirs = list(probe_dirs)
+
         contacts_corr = [c + d * GRIPPER_TIP_OFFSET
-                         for c, d in zip(contacts, probe_dirs)]
+                         for c, d in zip(contacts, offset_dirs)]
         W1, W2, S1, S2 = contacts_corr
-        for (name, *_rest), c_raw, c_cor in zip(probes_p2, contacts, contacts_corr):
+        for (name, *_rest), c_raw, c_cor, d_yaw in zip(
+                probes_p2, contacts, contacts_corr, delta_yaws):
             rospy.loginfo(f"  {name}: raw=({c_raw[0]:+.4f},{c_raw[1]:+.4f}) "
-                          f"-> corr=({c_cor[0]:+.4f},{c_cor[1]:+.4f})")
+                          f"-> corr=({c_cor[0]:+.4f},{c_cor[1]:+.4f}) "
+                          f"[Δyaw={np.degrees(d_yaw):+.3f}deg]")
 
         # اعادة حساب المحاور من النقاط المصححة
         eN_meas = (W2 - W1) / np.linalg.norm(W2 - W1)
