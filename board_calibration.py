@@ -12,10 +12,6 @@ board_calibration.py
 - ForceMonitor: مراقبة القوة الخارجية عبر FrankaState
 - BoardCalibration: يمسك حالة المعايرة + يبنى خرائط المواقع
   + ينفذ الـprobing والمعايرة (two-pass) + save/load/show/test
-
-[DIAG PATCH]
-هذا الإصدار يضيف logging تشخيصي فقط داخل _probe_linear لقياس انحراف
-الـwrist (Δyaw) عند نقطة التلامس. لا يغير حسابات المعايرة بأي شكل.
 """
 
 import os
@@ -194,14 +190,14 @@ def _rot_2d(v, angle):
 
 
 def _yaw_from_pose(pose):
-    """يستخرج yaw من geometry_msgs/Pose.orientation (rad)."""
+    """يستخرج yaw من geometry_msgs/Pose.orientation (rad). [DIAG helper]"""
     q = pose.orientation
     _, _, yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
     return float(yaw)
 
 
 def _wrap_angle(a):
-    """يلف الزاوية إلى [-pi, +pi] لتفادي قفزات ±360°."""
+    """يلف الزاوية إلى [-pi, +pi] لتفادي قفزات ±360°. [DIAG helper]"""
     return float(np.arctan2(np.sin(a), np.cos(a)))
 
 
@@ -357,22 +353,11 @@ class BoardCalibration:
     def _probe_linear(self, move_group, force_monitor, direction_xy,
                       max_travel=PROBE_MAX_TRAVEL,
                       force_threshold=PROBE_FORCE_THRESH):
-        """
-        يتحرك خطياً حتى يلامس عقبة (يقاس من |F_xy|).
-        يرجع نقطة التلامس [x, y] أو None.
-
-        [DIAG PATCH] يطبع:
-          - yaw_start  : قبل البدء (nominal)
-          - yaw_loaded : لحظة الـcontact (تحت الحمل)
-          - yaw_settled: بعد 0.25s
-        مع Δyaw وكم خطأ الـtip المتوقع منه.
-        لا يغير حساب نقطة التلامس المرجَعة.
-        """
         cur = get_current_pose_in_ref(move_group)
         start = np.array([cur.position.x, cur.position.y])
         z = cur.position.z
 
-        # --- DIAG: yaw قبل التلامس ---
+        # --- DIAG: yaw قبل البدء (nominal) ---
         yaw_start = _yaw_from_pose(cur)
 
         d = np.asarray(direction_xy, dtype=float)
@@ -402,7 +387,6 @@ class BoardCalibration:
                       f"max={max_travel*1000:.0f}mm, thresh={force_threshold:.1f}N")
         rospy.loginfo(f"  [probe][DIAG] yaw_start              = "
                       f"{np.degrees(yaw_start):+.4f} deg")
-
         move_group.execute(plan, wait=False)
 
         rate = rospy.Rate(200)
@@ -436,7 +420,7 @@ class BoardCalibration:
         if not contact:
             return None
 
-        # --- DIAG: yaw عند التلامس (تحت الحمل) ---
+        # --- DIAG: yaw لحظة التلامس (تحت الحمل) ---
         cur_loaded = get_current_pose_in_ref(move_group)
         yaw_loaded = _yaw_from_pose(cur_loaded)
         d_yaw_loaded = _wrap_angle(yaw_loaded - yaw_start)
