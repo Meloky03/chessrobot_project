@@ -71,7 +71,7 @@ SQUARE_SIZE = 0.045
 # --- اعدادات الـprobing ---
 # =====================================================================
 PROBE_Z              = 0.06
-PROBE_SPEED_SCALE    = 0.02   # السرعة الافتراضية (FAR)
+PROBE_SPEED_SCALE    = 0.02   # السرعة الافتراضية الابتدائية (FAR)
 PROBE_ACCEL_SCALE    = 0.02
 PROBE_MAX_TRAVEL     = 0.4
 PROBE_RETREAT        = 0.020
@@ -84,20 +84,16 @@ PROBE_BIAS_RATE_HZ   = 100
 PROBE_CONTACT_CONSEC = 3     # عدد العينات المتتالية لتأكيد اللمس
 PROBE_MIN_TRAVEL     = 0.005 # أقل مسافة قبل قبول contact (لتجاهل spike البداية)
 
-# --- اعدادات Adaptive Speed ---
-# 3 مستويات سرعة حسب القوة المقاسة:
-ADAPT_SPEED_FAR    = 0.02    # 2% - بعيد عن الحافة (قوة < 25% من العتبة)
+# --- اعدادات Adaptive Speed (حركة مستمرة، replan على الطاير) ---
+# 3 مستويات سرعة حسب القوة المقاسة. الذراع بيتحرك بشكل مستمر،
+# ولما القوة تعدي عتبة المستوى الجاي، الكود بيعمل replan فوري
+# (execute بـwait=False) فالـtrajectory الحالية بتنستبدل بدون stop.
+ADAPT_SPEED_FAR    = 0.02    # 2%   - بعيد عن الحافة (قوة < 25% من العتبة)
 ADAPT_SPEED_NEAR   = 0.005   # 0.5% - يقترب (قوة 25-60%)
 ADAPT_SPEED_TOUCH  = 0.001   # 0.1% - يكاد يلامس (قوة > 60%)
 
-# حدود التحويل بين مستويات السرعة (نسبة من force_threshold)
 ADAPT_THRESH_NEAR  = 0.25    # يصير NEAR لما F > 25% من العتبة
 ADAPT_THRESH_TOUCH = 0.60    # يصير TOUCH لما F > 60% من العتبة
-
-# حجم الـsegment لكل مستوى (m)
-ADAPT_SEG_FAR      = 0.010   # 10mm - بسرعة عالية segments أكبر
-ADAPT_SEG_NEAR     = 0.003   # 3mm
-ADAPT_SEG_TOUCH    = 0.001   # 1mm - precision عالية عند الـcontact
 
 # --- ازاحة طرف القابض عن مركز TCP ---
 GRIPPER_TIP_OFFSET = (0.018 / 2) - 0.00
@@ -369,18 +365,19 @@ class BoardCalibration:
         self.hz = SAFE_H
 
     # ------------------------------------------------------------------
-    # --- probing (Adaptive Speed) ---
+    # --- probing (Adaptive Speed - Continuous) ---
     # ------------------------------------------------------------------
     def _probe_linear(self, move_group, force_monitor, direction_xy,
                       max_travel=PROBE_MAX_TRAVEL,
                       force_threshold=PROBE_FORCE_THRESH):
         """
-        Probing بسرعة متكيفة (Adaptive Speed):
-          - يقسم الحركة لـsegments صغيرة
-          - بين كل segment يقرأ القوة ويحدد سرعة + حجم الـsegment التالي
-          - 3 مستويات: FAR (2%, 10mm) -> NEAR (0.5%, 3mm) -> TOUCH (0.1%, 1mm)
-          - السرعة بتنقص لما الذراع يحس بمقاومة
-          - بدون momentum عند الـcontact -> بدون زحلقة لأسفل
+        Probing بسرعة متكيفة بحركة مستمرة:
+          - الذراع بيتحرك بشكل مستمر من البداية للنهاية
+          - السرعة بتتغير على الطاير حسب القوة المقاسة
+          - 3 مستويات: FAR (2%) -> NEAR (0.5%) -> TOUCH (0.1%)
+          - الـreplan بيصير أثناء الحركة (execute بـwait=False يستبدل
+            الـtrajectory الحالية بدون stop)
+          - الـSTOP الوحيد = عند اللمس الفعلي
 
         يرجع (نقطة التلامس [x, y], delta_yaw_settled) أو None.
         """
@@ -393,6 +390,7 @@ class BoardCalibration:
 
         d = np.asarray(direction_xy, dtype=float)
         d = d / np.linalg.norm(d)
+        target_xy_final = start + d * max_travel
 
         rospy.loginfo("  [adaptive] zeroing force bias ...")
         force_monitor.zero_bias()
@@ -402,156 +400,115 @@ class BoardCalibration:
         rospy.loginfo(f"  [adaptive] speeds: FAR={ADAPT_SPEED_FAR*100:.1f}% "
                       f"NEAR={ADAPT_SPEED_NEAR*100:.2f}% "
                       f"TOUCH={ADAPT_SPEED_TOUCH*100:.2f}%")
+        rospy.loginfo(f"  [adaptive] CONTINUOUS motion (no stop until contact)")
         rospy.loginfo(f"  [probe][DIAG] yaw_start              = "
                       f"{np.degrees(yaw_start):+.4f} deg")
 
         thresh_near  = force_threshold * ADAPT_THRESH_NEAR
         thresh_touch = force_threshold * ADAPT_THRESH_TOUCH
 
-        total_traveled = 0.0
-        consec = 0
+        # ----------------------------------------------------------
+        # هيلبر صغير: يخطط trajectory من المكان الحالي للهدف بسرعة محددة
+        # ويبدأ تنفيذها بـwait=False (أي بدون انتظار)
+        # ----------------------------------------------------------
+        def _launch_trajectory_to_final(speed_scale):
+            cur_pose = get_current_pose_in_ref(move_group)
+            target_pose = copy.deepcopy(cur_pose)
+            target_pose.position.x = float(target_xy_final[0])
+            target_pose.position.y = float(target_xy_final[1])
+            target_pose.position.z = float(z)
+
+            plan, fraction = move_group.compute_cartesian_path(
+                [target_pose], 0.005, False)
+            if fraction < 0.9:
+                return False, fraction
+            plan = move_group.retime_trajectory(
+                move_group.get_current_state(), plan,
+                speed_scale, speed_scale,
+                "iterative_time_parameterization")
+            # execute بـwait=False: لو في trajectory شغالة، MoveIt
+            # بيستبدلها فوراً بدون stop ملحوظ على الذراع
+            move_group.execute(plan, wait=False)
+            return True, fraction
+
+        # ----------------------------------------------------------
+        # ابدأ الحركة بسرعة FAR
+        # ----------------------------------------------------------
+        ok, frac = _launch_trajectory_to_final(ADAPT_SPEED_FAR)
+        if not ok:
+            rospy.logerr(f"  [adaptive] initial cartesian plan failed: "
+                         f"fraction={frac:.2f}")
+            return None
+        current_label = "FAR"
+        rospy.loginfo(f"  [adaptive] >> FAR (continuous, speed="
+                      f"{ADAPT_SPEED_FAR*100:.1f}%)")
+
+        # ----------------------------------------------------------
+        # حلقة المراقبة: نقرأ القوة 200Hz ونعمل replan لما المستوى يتغير
+        # ----------------------------------------------------------
+        rate = rospy.Rate(200)
         contact = False
-        prev_label = None
+        consec = 0
+        last_replan_t = rospy.Time.now()
+        REPLAN_COOLDOWN = 0.3  # ثانية - ما نعمل replan أكتر من مرة كل 300ms
 
-        while (total_traveled < max_travel) and (not rospy.is_shutdown()):
-            # -----------------------------------------------------------
-            # 1) قياس القوة قبل segment جديد (الذراع stable بين الـsegments)
-            # -----------------------------------------------------------
-            rospy.sleep(0.10)   # استقرار قبل القياس
+        t0 = rospy.Time.now()
+        timeout = 90.0   # وقت كافي للـTOUCH البطيء
+
+        while not rospy.is_shutdown() and (rospy.Time.now() - t0).to_sec() < timeout:
             fmag = force_monitor.get_xy_magnitude()
+            cur_now = get_current_pose_in_ref(move_group)
+            traveled = np.hypot(cur_now.position.x - start[0],
+                                cur_now.position.y - start[1])
 
-            # -----------------------------------------------------------
-            # 2) فحص contact مباشرة قبل ما نتحرك
-            # -----------------------------------------------------------
-            if fmag > force_threshold and total_traveled > PROBE_MIN_TRAVEL:
+            # --- contact detection: STOP الوحيد ---
+            if fmag > force_threshold and traveled > PROBE_MIN_TRAVEL:
                 consec += 1
                 if consec >= PROBE_CONTACT_CONSEC:
-                    rospy.loginfo(f"  [adaptive] CONTACT! |F_xy|={fmag:.2f} N "
-                                  f"traveled={total_traveled*1000:.1f}mm "
-                                  f"(static check)")
+                    move_group.stop()
+                    rospy.loginfo(f"  [adaptive] CONTACT! |F_xy|={fmag:.2f}N "
+                                  f"traveled={traveled*1000:.1f}mm "
+                                  f"(label={current_label})")
                     contact = True
                     break
             else:
                 consec = 0
 
-            # -----------------------------------------------------------
-            # 3) حدد السرعة + حجم الـsegment حسب القوة
-            # -----------------------------------------------------------
+            # --- حدد المستوى المطلوب حسب القوة ---
             if fmag < thresh_near:
-                speed = ADAPT_SPEED_FAR
-                seg   = ADAPT_SEG_FAR
-                label = "FAR"
+                new_label = "FAR"
+                new_speed = ADAPT_SPEED_FAR
             elif fmag < thresh_touch:
-                speed = ADAPT_SPEED_NEAR
-                seg   = ADAPT_SEG_NEAR
-                label = "NEAR"
+                new_label = "NEAR"
+                new_speed = ADAPT_SPEED_NEAR
             else:
-                speed = ADAPT_SPEED_TOUCH
-                seg   = ADAPT_SEG_TOUCH
-                label = "TOUCH"
+                new_label = "TOUCH"
+                new_speed = ADAPT_SPEED_TOUCH
 
-            # طباعة فقط لما يتغير المستوى (لتفادي spam)
-            if label != prev_label:
-                rospy.loginfo(f"  [adaptive] >> {label} "
-                              f"(|F_xy|={fmag:.2f}N, speed={speed*100:.2f}%, "
-                              f"seg={seg*1000:.1f}mm)")
-                prev_label = label
+            # --- لو المستوى تغير، اعمل replan بسرعة جديدة (بدون stop) ---
+            time_since_replan = (rospy.Time.now() - last_replan_t).to_sec()
+            if new_label != current_label and time_since_replan > REPLAN_COOLDOWN:
+                ok, frac = _launch_trajectory_to_final(new_speed)
+                if ok:
+                    rospy.loginfo(f"  [adaptive] >> {new_label} "
+                                  f"(|F_xy|={fmag:.2f}N, speed={new_speed*100:.2f}%, "
+                                  f"trav={traveled*1000:.1f}mm)")
+                    current_label = new_label
+                    last_replan_t = rospy.Time.now()
 
-            # تأكد ما نتجاوز max_travel
-            seg = min(seg, max_travel - total_traveled)
-            if seg <= 0:
+            # --- وصلنا لـmax_travel بدون contact ---
+            if np.hypot(target_xy_final[0]-cur_now.position.x,
+                        target_xy_final[1]-cur_now.position.y) < 0.002:
+                rospy.logwarn(f"  [adaptive] reached max_travel without contact "
+                              f"(traveled={traveled*1000:.1f}mm)")
                 break
 
-            # -----------------------------------------------------------
-            # 4) خطط segment وحرك
-            # -----------------------------------------------------------
-            cur_pose = get_current_pose_in_ref(move_group)
-            cur_xy = np.array([cur_pose.position.x, cur_pose.position.y])
-            target_xy = cur_xy + d * seg
+            rate.sleep()
 
-            target_pose = copy.deepcopy(cur_pose)
-            target_pose.position.x = float(target_xy[0])
-            target_pose.position.y = float(target_xy[1])
-            target_pose.position.z = float(z)
+        move_group.stop()
+        move_group.clear_pose_targets()
 
-            plan, fraction = move_group.compute_cartesian_path(
-                [target_pose], 0.001, False)
-            if fraction < 0.9:
-                rospy.logwarn(f"  [adaptive] plan failed at "
-                              f"trav={total_traveled*1000:.1f}mm "
-                              f"(fraction={fraction:.2f})")
-                break
-
-            plan = move_group.retime_trajectory(
-                move_group.get_current_state(), plan,
-                speed, speed,
-                "iterative_time_parameterization")
-
-            move_group.execute(plan, wait=False)
-
-            # -----------------------------------------------------------
-            # 5) راقب القوة أثناء الـsegment (قد يحس contact في النص)
-            # -----------------------------------------------------------
-            rate = rospy.Rate(200)
-            seg_t0 = rospy.Time.now()
-            seg_timeout = max(2.0, (seg / max(speed * 0.5, 1e-4)) + 1.0)
-            seg_consec = 0
-            seg_done = False
-
-            while not rospy.is_shutdown():
-                fmag_now = force_monitor.get_xy_magnitude()
-
-                # contact أثناء الحركة
-                if fmag_now > force_threshold and total_traveled > PROBE_MIN_TRAVEL:
-                    seg_consec += 1
-                    if seg_consec >= PROBE_CONTACT_CONSEC:
-                        move_group.stop()
-                        cur_now = get_current_pose_in_ref(move_group)
-                        traveled_seg = np.hypot(
-                            cur_now.position.x - cur_xy[0],
-                            cur_now.position.y - cur_xy[1])
-                        total_traveled += traveled_seg
-                        rospy.loginfo(f"  [adaptive] CONTACT! |F_xy|={fmag_now:.2f}N "
-                                      f"traveled={total_traveled*1000:.1f}mm "
-                                      f"(mid-segment, label={label})")
-                        contact = True
-                        break
-                else:
-                    seg_consec = 0
-
-                # هل وصلنا لنهاية الـsegment؟
-                cur_now = get_current_pose_in_ref(move_group)
-                traveled_seg = np.hypot(
-                    cur_now.position.x - cur_xy[0],
-                    cur_now.position.y - cur_xy[1])
-                if traveled_seg >= seg * 0.95:
-                    seg_done = True
-                    total_traveled += traveled_seg
-                    break
-
-                # timeout
-                if (rospy.Time.now() - seg_t0).to_sec() > seg_timeout:
-                    rospy.logwarn(f"  [adaptive] segment timeout "
-                                  f"(travel_seg={traveled_seg*1000:.1f}mm)")
-                    total_traveled += traveled_seg
-                    break
-
-                rate.sleep()
-
-            move_group.stop()
-            move_group.clear_pose_targets()
-
-            if contact:
-                break
-            if not seg_done:
-                # ما اكتمل الـsegment طبيعياً (contact أو timeout)
-                # لو contact: انكسر فوق. لو timeout: نحاول segment تاني.
-                continue
-
-        # نهاية الـloop
         if not contact:
-            rospy.logwarn(f"  [adaptive] reached max_travel without contact "
-                          f"(traveled={total_traveled*1000:.1f}mm)")
             return None
 
         # --- yaw لحظة التلامس (تحت الحمل) ---
