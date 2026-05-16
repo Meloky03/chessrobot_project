@@ -543,6 +543,14 @@ class BoardCalibration:
         move_to_pose(arm, back_xy[0], back_xy[1], PROBE_Z,
                      V_SLOW, A_SLOW, yaw=probe_yaw)
 
+        # --- post-contact safety: re-close gripper ---
+        # بعد الـretreat الذراع بعيد عن اللوحة بـPROBE_RETREAT (20mm)،
+        # فآمن نعيد إغلاق الفك للتأكد إنه ما انفتح خلال التلامس.
+        # إذا انفتح فعلاً، Grasp الجديد بيرجّعه بقوة PROBE_GRASP_FORCE.
+        if gripper_client is not None:
+            rospy.loginfo("  [probe] re-grasp after retreat (verify closed)")
+            gripper_grasp_close(gripper_client)
+
         lift_z = PROBE_Z + PROBE_POST_LIFT
         move_to_pose(arm, back_xy[0], back_xy[1], lift_z,
                      V_SLOW, A_SLOW, yaw=probe_yaw)

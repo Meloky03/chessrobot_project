@@ -62,8 +62,13 @@
 delta_yaw_settled). يحذر إذا الانحراف > 3°.
 
 #### `_do_probe()`
-سلسلة كاملة: full-close → ارتفاع transit → نقطة بدء → نزول إلى PROBE_Z →
-`_probe_linear` → retreat بـ20mm → lift → return to transit Z.
+سلسلة كاملة: grasp-close → ارتفاع transit → نقطة بدء → نزول إلى PROBE_Z →
+`_probe_linear` → retreat بـ20mm → **re-grasp (safety check)** → lift →
+return to transit Z.
+
+> **re-grasp بعد الـretreat**: بعد ما الذراع يبتعد 20mm عن اللوحة، نعيد
+> الإغلاق بـ`gripper_grasp_close` بقوة 20N. الهدف: التأكد إن الفك ما
+> انفتح خلال التلامس ولو حصل، بنرجّعه قبل الـlift والـtransit.
 
 #### `calibrate()` — Two-pass
 - **Pass 1**: probe W1+W2 بـyaw الأصلي → تقدير θ من ميل الحافة.
