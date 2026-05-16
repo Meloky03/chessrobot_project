@@ -612,10 +612,10 @@ class BoardCalibration:
                       f"{ADAPT_SPEED_FAR*100:.1f}% / "
                       f"{ADAPT_SPEED_NEAR*100:.2f}% / "
                       f"{ADAPT_SPEED_TOUCH*100:.2f}%")
-        rospy.loginfo(f"  segments              : "
-                      f"{ADAPT_SEG_FAR*1000:.0f}/"
-                      f"{ADAPT_SEG_NEAR*1000:.0f}/"
-                      f"{ADAPT_SEG_TOUCH*1000:.0f} mm")
+        rospy.loginfo(f"  thresholds (NEAR/TOUCH) : "
+                      f"{ADAPT_THRESH_NEAR*100:.0f}% / "
+                      f"{ADAPT_THRESH_TOUCH*100:.0f}% of force_threshold")
+        rospy.loginfo(f"  motion mode      : CONTINUOUS (no stop until contact)")
         rospy.loginfo(f"  force threshold  : {PROBE_FORCE_THRESH:.1f} N")
         rospy.loginfo(f"  max travel       : {PROBE_MAX_TRAVEL*1000:.0f} mm")
         rospy.loginfo("=" * 62)
