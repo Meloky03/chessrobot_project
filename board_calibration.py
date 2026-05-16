@@ -13,8 +13,11 @@ board_calibration.py
 - BoardCalibration: يمسك حالة المعايرة + يبنى خرائط المواقع
   + ينفذ الـprobing والمعايرة (two-pass) + save/load/show/test
 
-ملاحظة: المعايرة تبدأ من الجانب الجنوبي (S1, S2) لتقدير θ، ثم
-تنتقل للجانب الغربي بعد التصحيح.
+تعديلات هذه النسخة (Adaptive Speed Probing):
+- الـprobing بسرعة متكيفة: السرعة بتنقص لما الذراع يحس بقوة
+- 3 مستويات سرعة: FAR (2%) -> NEAR (0.5%) -> TOUCH (0.1%)
+- لما السرعة منخفضة، الـsegment أصغر (precision عالية عند الـcontact)
+- بدون momentum -> بدون زحلقة لأسفل عند اللمس
 """
 
 import os
@@ -54,7 +57,7 @@ GRIPPER_SPEED = 0.1
 # =====================================================================
 # --- ثوابت هندسة اللوحة ---
 # =====================================================================
-BOARD_OUTER_SIZE = 0.420
+BOARD_OUTER_SIZE = 0.360
 PLAY_AREA_SIZE   = 0.360
 MARGIN           = (BOARD_OUTER_SIZE - PLAY_AREA_SIZE) / 2.0  # 0.030m
 
@@ -68,7 +71,7 @@ SQUARE_SIZE = 0.045
 # --- اعدادات الـprobing ---
 # =====================================================================
 PROBE_Z              = 0.06
-PROBE_SPEED_SCALE    = 0.02
+PROBE_SPEED_SCALE    = 0.02   # السرعة الافتراضية (FAR)
 PROBE_ACCEL_SCALE    = 0.02
 PROBE_MAX_TRAVEL     = 0.4
 PROBE_RETREAT        = 0.020
@@ -80,6 +83,21 @@ PROBE_BIAS_SAMPLES   = 50
 PROBE_BIAS_RATE_HZ   = 100
 PROBE_CONTACT_CONSEC = 3     # عدد العينات المتتالية لتأكيد اللمس
 PROBE_MIN_TRAVEL     = 0.005 # أقل مسافة قبل قبول contact (لتجاهل spike البداية)
+
+# --- اعدادات Adaptive Speed ---
+# 3 مستويات سرعة حسب القوة المقاسة:
+ADAPT_SPEED_FAR    = 0.02    # 2% - بعيد عن الحافة (قوة < 25% من العتبة)
+ADAPT_SPEED_NEAR   = 0.005   # 0.5% - يقترب (قوة 25-60%)
+ADAPT_SPEED_TOUCH  = 0.001   # 0.1% - يكاد يلامس (قوة > 60%)
+
+# حدود التحويل بين مستويات السرعة (نسبة من force_threshold)
+ADAPT_THRESH_NEAR  = 0.25    # يصير NEAR لما F > 25% من العتبة
+ADAPT_THRESH_TOUCH = 0.60    # يصير TOUCH لما F > 60% من العتبة
+
+# حجم الـsegment لكل مستوى (m)
+ADAPT_SEG_FAR      = 0.010   # 10mm - بسرعة عالية segments أكبر
+ADAPT_SEG_NEAR     = 0.003   # 3mm
+ADAPT_SEG_TOUCH    = 0.001   # 1mm - precision عالية عند الـcontact
 
 # --- ازاحة طرف القابض عن مركز TCP ---
 GRIPPER_TIP_OFFSET = (0.018 / 2) - 0.00
@@ -261,9 +279,6 @@ class BoardCalibration:
       - graveyard_positions : 24 مربع
       - hx, hy, hz          : نقطة الـhome
     ويوفر probing + calibrate (two-pass) + save/load/show/test.
-
-    ترتيب المعايرة: يبدأ بالجانب الجنوبي (S1, S2) لتقدير θ، ثم
-    ينتقل للغربي + الجنوبي بـyaw مصحح بـPass 2.
     """
 
     def __init__(self):
@@ -354,15 +369,20 @@ class BoardCalibration:
         self.hz = SAFE_H
 
     # ------------------------------------------------------------------
-    # --- probing ---
+    # --- probing (Adaptive Speed) ---
     # ------------------------------------------------------------------
     def _probe_linear(self, move_group, force_monitor, direction_xy,
                       max_travel=PROBE_MAX_TRAVEL,
                       force_threshold=PROBE_FORCE_THRESH):
         """
-        يتحرك خطياً حتى يلامس عقبة (يقاس من |F_xy|).
+        Probing بسرعة متكيفة (Adaptive Speed):
+          - يقسم الحركة لـsegments صغيرة
+          - بين كل segment يقرأ القوة ويحدد سرعة + حجم الـsegment التالي
+          - 3 مستويات: FAR (2%, 10mm) -> NEAR (0.5%, 3mm) -> TOUCH (0.1%, 1mm)
+          - السرعة بتنقص لما الذراع يحس بمقاومة
+          - بدون momentum عند الـcontact -> بدون زحلقة لأسفل
+
         يرجع (نقطة التلامس [x, y], delta_yaw_settled) أو None.
-        delta_yaw_settled = الفرق بين yaw الفعلي بعد الاستقرار و yaw البداية.
         """
         cur = get_current_pose_in_ref(move_group)
         start = np.array([cur.position.x, cur.position.y])
@@ -373,62 +393,165 @@ class BoardCalibration:
 
         d = np.asarray(direction_xy, dtype=float)
         d = d / np.linalg.norm(d)
-        target_xy = start + d * max_travel
 
-        target_pose = copy.deepcopy(cur)
-        target_pose.position.x = float(target_xy[0])
-        target_pose.position.y = float(target_xy[1])
-        target_pose.position.z = float(z)
-
-        plan, fraction = move_group.compute_cartesian_path(
-            [target_pose], 0.005, False)
-        if fraction < 0.9:
-            rospy.logerr(f"  [probe] cartesian plan failed: fraction={fraction:.2f}")
-            return None
-
-        plan = move_group.retime_trajectory(
-            move_group.get_current_state(), plan,
-            PROBE_SPEED_SCALE, PROBE_ACCEL_SCALE,
-            "iterative_time_parameterization")
-
-        rospy.loginfo("  [probe] zeroing force bias ...")
+        rospy.loginfo("  [adaptive] zeroing force bias ...")
         force_monitor.zero_bias()
 
-        rospy.loginfo(f"  [probe] moving: dir=({d[0]:+.2f},{d[1]:+.2f}), "
+        rospy.loginfo(f"  [adaptive] probing: dir=({d[0]:+.2f},{d[1]:+.2f}), "
                       f"max={max_travel*1000:.0f}mm, thresh={force_threshold:.1f}N")
+        rospy.loginfo(f"  [adaptive] speeds: FAR={ADAPT_SPEED_FAR*100:.1f}% "
+                      f"NEAR={ADAPT_SPEED_NEAR*100:.2f}% "
+                      f"TOUCH={ADAPT_SPEED_TOUCH*100:.2f}%")
         rospy.loginfo(f"  [probe][DIAG] yaw_start              = "
                       f"{np.degrees(yaw_start):+.4f} deg")
-        move_group.execute(plan, wait=False)
 
-        rate = rospy.Rate(200)
-        contact = False
+        thresh_near  = force_threshold * ADAPT_THRESH_NEAR
+        thresh_touch = force_threshold * ADAPT_THRESH_TOUCH
+
+        total_traveled = 0.0
         consec = 0
-        t0 = rospy.Time.now()
-        timeout = 30.0
-        while not rospy.is_shutdown() and (rospy.Time.now() - t0).to_sec() < timeout:
+        contact = False
+        prev_label = None
+
+        while (total_traveled < max_travel) and (not rospy.is_shutdown()):
+            # -----------------------------------------------------------
+            # 1) قياس القوة قبل segment جديد (الذراع stable بين الـsegments)
+            # -----------------------------------------------------------
+            rospy.sleep(0.10)   # استقرار قبل القياس
             fmag = force_monitor.get_xy_magnitude()
-            cur_now = get_current_pose_in_ref(move_group)
-            traveled = np.hypot(cur_now.position.x - start[0],
-                                cur_now.position.y - start[1])
-            if fmag > force_threshold and traveled > PROBE_MIN_TRAVEL:
+
+            # -----------------------------------------------------------
+            # 2) فحص contact مباشرة قبل ما نتحرك
+            # -----------------------------------------------------------
+            if fmag > force_threshold and total_traveled > PROBE_MIN_TRAVEL:
                 consec += 1
                 if consec >= PROBE_CONTACT_CONSEC:
-                    move_group.stop()
-                    rospy.loginfo(f"  [probe] CONTACT! |F_xy|={fmag:.2f} N "
-                                  f"traveled={traveled*1000:.1f}mm")
+                    rospy.loginfo(f"  [adaptive] CONTACT! |F_xy|={fmag:.2f} N "
+                                  f"traveled={total_traveled*1000:.1f}mm "
+                                  f"(static check)")
                     contact = True
                     break
             else:
                 consec = 0
-            if np.hypot(target_xy[0]-cur_now.position.x,
-                        target_xy[1]-cur_now.position.y) < 0.002:
-                rospy.logwarn("  [probe] reached max_travel without contact")
-                break
-            rate.sleep()
 
-        move_group.stop()
-        move_group.clear_pose_targets()
+            # -----------------------------------------------------------
+            # 3) حدد السرعة + حجم الـsegment حسب القوة
+            # -----------------------------------------------------------
+            if fmag < thresh_near:
+                speed = ADAPT_SPEED_FAR
+                seg   = ADAPT_SEG_FAR
+                label = "FAR"
+            elif fmag < thresh_touch:
+                speed = ADAPT_SPEED_NEAR
+                seg   = ADAPT_SEG_NEAR
+                label = "NEAR"
+            else:
+                speed = ADAPT_SPEED_TOUCH
+                seg   = ADAPT_SEG_TOUCH
+                label = "TOUCH"
+
+            # طباعة فقط لما يتغير المستوى (لتفادي spam)
+            if label != prev_label:
+                rospy.loginfo(f"  [adaptive] >> {label} "
+                              f"(|F_xy|={fmag:.2f}N, speed={speed*100:.2f}%, "
+                              f"seg={seg*1000:.1f}mm)")
+                prev_label = label
+
+            # تأكد ما نتجاوز max_travel
+            seg = min(seg, max_travel - total_traveled)
+            if seg <= 0:
+                break
+
+            # -----------------------------------------------------------
+            # 4) خطط segment وحرك
+            # -----------------------------------------------------------
+            cur_pose = get_current_pose_in_ref(move_group)
+            cur_xy = np.array([cur_pose.position.x, cur_pose.position.y])
+            target_xy = cur_xy + d * seg
+
+            target_pose = copy.deepcopy(cur_pose)
+            target_pose.position.x = float(target_xy[0])
+            target_pose.position.y = float(target_xy[1])
+            target_pose.position.z = float(z)
+
+            plan, fraction = move_group.compute_cartesian_path(
+                [target_pose], 0.001, False)
+            if fraction < 0.9:
+                rospy.logwarn(f"  [adaptive] plan failed at "
+                              f"trav={total_traveled*1000:.1f}mm "
+                              f"(fraction={fraction:.2f})")
+                break
+
+            plan = move_group.retime_trajectory(
+                move_group.get_current_state(), plan,
+                speed, speed,
+                "iterative_time_parameterization")
+
+            move_group.execute(plan, wait=False)
+
+            # -----------------------------------------------------------
+            # 5) راقب القوة أثناء الـsegment (قد يحس contact في النص)
+            # -----------------------------------------------------------
+            rate = rospy.Rate(200)
+            seg_t0 = rospy.Time.now()
+            seg_timeout = max(2.0, (seg / max(speed * 0.5, 1e-4)) + 1.0)
+            seg_consec = 0
+            seg_done = False
+
+            while not rospy.is_shutdown():
+                fmag_now = force_monitor.get_xy_magnitude()
+
+                # contact أثناء الحركة
+                if fmag_now > force_threshold and total_traveled > PROBE_MIN_TRAVEL:
+                    seg_consec += 1
+                    if seg_consec >= PROBE_CONTACT_CONSEC:
+                        move_group.stop()
+                        cur_now = get_current_pose_in_ref(move_group)
+                        traveled_seg = np.hypot(
+                            cur_now.position.x - cur_xy[0],
+                            cur_now.position.y - cur_xy[1])
+                        total_traveled += traveled_seg
+                        rospy.loginfo(f"  [adaptive] CONTACT! |F_xy|={fmag_now:.2f}N "
+                                      f"traveled={total_traveled*1000:.1f}mm "
+                                      f"(mid-segment, label={label})")
+                        contact = True
+                        break
+                else:
+                    seg_consec = 0
+
+                # هل وصلنا لنهاية الـsegment؟
+                cur_now = get_current_pose_in_ref(move_group)
+                traveled_seg = np.hypot(
+                    cur_now.position.x - cur_xy[0],
+                    cur_now.position.y - cur_xy[1])
+                if traveled_seg >= seg * 0.95:
+                    seg_done = True
+                    total_traveled += traveled_seg
+                    break
+
+                # timeout
+                if (rospy.Time.now() - seg_t0).to_sec() > seg_timeout:
+                    rospy.logwarn(f"  [adaptive] segment timeout "
+                                  f"(travel_seg={traveled_seg*1000:.1f}mm)")
+                    total_traveled += traveled_seg
+                    break
+
+                rate.sleep()
+
+            move_group.stop()
+            move_group.clear_pose_targets()
+
+            if contact:
+                break
+            if not seg_done:
+                # ما اكتمل الـsegment طبيعياً (contact أو timeout)
+                # لو contact: انكسر فوق. لو timeout: نحاول segment تاني.
+                continue
+
+        # نهاية الـloop
         if not contact:
+            rospy.logwarn(f"  [adaptive] reached max_travel without contact "
+                          f"(traveled={total_traveled*1000:.1f}mm)")
             return None
 
         # --- yaw لحظة التلامس (تحت الحمل) ---
@@ -520,17 +643,23 @@ class BoardCalibration:
         return contact, d_yaw
 
     # ------------------------------------------------------------------
-    # --- المعايرة الرئيسية (Two-pass) - تبدأ من الجنوبي ---
+    # --- المعايرة الرئيسية (Two-pass) ---
     # ------------------------------------------------------------------
     def calibrate(self, arm, force_monitor, gripper_client=None, confirm=True):
         rospy.loginfo("=" * 62)
-        rospy.loginfo("Starting board calibration (two-pass, SOUTH-first)")
+        rospy.loginfo("Starting board calibration (two-pass, ADAPTIVE SPEED)")
         rospy.loginfo(f"  probe height Z   : {PROBE_Z:.3f} m")
         rospy.loginfo(f"  transit height Z : {PROBE_TRANSIT_Z:.3f} m")
         rospy.loginfo(f"  post-contact lift: {PROBE_POST_LIFT*1000:.0f} mm")
-        rospy.loginfo(f"  probe speed      : {PROBE_SPEED_SCALE*100:.0f}% of max")
-        rospy.loginfo(f"  force threshold W: {PROBE_FORCE_THRESH:.1f} N")
-        rospy.loginfo(f"  force threshold S: {PROBE_FORCE_THRESH_S:.1f} N")
+        rospy.loginfo(f"  speeds (FAR/NEAR/TOUCH) : "
+                      f"{ADAPT_SPEED_FAR*100:.1f}% / "
+                      f"{ADAPT_SPEED_NEAR*100:.2f}% / "
+                      f"{ADAPT_SPEED_TOUCH*100:.2f}%")
+        rospy.loginfo(f"  segments              : "
+                      f"{ADAPT_SEG_FAR*1000:.0f}/"
+                      f"{ADAPT_SEG_NEAR*1000:.0f}/"
+                      f"{ADAPT_SEG_TOUCH*1000:.0f} mm")
+        rospy.loginfo(f"  force threshold  : {PROBE_FORCE_THRESH:.1f} N")
         rospy.loginfo(f"  max travel       : {PROBE_MAX_TRAVEL*1000:.0f} mm")
         rospy.loginfo("=" * 62)
 
@@ -551,38 +680,30 @@ class BoardCalibration:
             rospy.loginfo(">>> Wrist-deflection correction: DISABLED (legacy)")
 
         # =============================================================
-        # PASS 1: S1 + S2 بـyaw الاصلي لتقدير θ من الحافة الجنوبية
+        # PASS 1: W1 + W2 بـyaw الاصلي لتقدير θ
         # =============================================================
-        rospy.loginfo(">>> PASS 1: estimating board angle from S1 & S2 (south edge)")
+        rospy.loginfo(">>> PASS 1: estimating board angle from W1 & W2")
         res = self._do_probe(arm, force_monitor, gripper_client,
-                             "S1 (pass1)", S1_START_XY,
-                             S_PROBE_DIR, S_PROBE_YAW,
-                             force_threshold=PROBE_FORCE_THRESH_S)
+                             "W1 (pass1)", W1_START_XY,
+                             W_PROBE_DIR, W_PROBE_YAW)
         if res is None:
             return False
-        S1_p1, _ = res
+        W1_p1, _ = res
 
         res = self._do_probe(arm, force_monitor, gripper_client,
-                             "S2 (pass1)", S2_START_XY,
-                             S_PROBE_DIR, S_PROBE_YAW,
-                             force_threshold=PROBE_FORCE_THRESH_S)
+                             "W2 (pass1)", W2_START_XY,
+                             W_PROBE_DIR, W_PROBE_YAW)
         if res is None:
             return False
-        S2_p1, _ = res
+        W2_p1, _ = res
 
-        # حساب θ من حافة الجنوب
-        # S_PROBE_DIR = (+1, 0) nominal (يتحرك +X يلمس الحافة الجنوبية)
-        # nominal dS = S2 - S1 ≈ (0, -0.05)  (Y تنقص لأن S2.y < S1.y)
-        # لو الحافة مايلة بـθ، dS بتميل وبدنا نقيس θ كزاوية انحراف عن (0,-1):
-        #   rotated dS = (sin(θ), -cos(θ))
-        #   theta_est = arctan2(sin(θ), cos(θ)) = arctan2(dS.x, -dS.y)
-        dS = S2_p1 - S1_p1
-        theta_est = float(np.arctan2(dS[0], -dS[1]))
-        rospy.loginfo(f"  S2 - S1 = ({dS[0]:+.4f}, {dS[1]:+.4f})")
+        dW = W2_p1 - W1_p1
+        theta_est = float(np.arctan2(dW[1], dW[0]))
+        rospy.loginfo(f"  W2 - W1 = ({dW[0]:+.4f}, {dW[1]:+.4f})")
         rospy.loginfo(f"  Estimated board theta = {np.degrees(theta_est):+.3f} deg")
 
         # =============================================================
-        # PASS 2: الرجوع بـyaw/dir مصححين بـθ (S أولاً ثم W)
+        # PASS 2: الرجوع بـyaw/dir مصححين بـθ
         # =============================================================
         rospy.loginfo(">>> PASS 2: re-probing with yaw/dir rotated by theta")
         W_dir_rot  = _rot_2d(np.array(W_PROBE_DIR, dtype=float), theta_est)
@@ -590,17 +711,16 @@ class BoardCalibration:
         W_yaw_corr = W_PROBE_YAW + theta_est
         S_yaw_corr = S_PROBE_YAW + theta_est
 
-        rospy.loginfo(f"  S: yaw={np.degrees(S_yaw_corr):+.2f}deg, "
-                      f"dir=({S_dir_rot[0]:+.3f},{S_dir_rot[1]:+.3f})")
         rospy.loginfo(f"  W: yaw={np.degrees(W_yaw_corr):+.2f}deg, "
                       f"dir=({W_dir_rot[0]:+.3f},{W_dir_rot[1]:+.3f})")
+        rospy.loginfo(f"  S: yaw={np.degrees(S_yaw_corr):+.2f}deg, "
+                      f"dir=({S_dir_rot[0]:+.3f},{S_dir_rot[1]:+.3f})")
 
-        # ترتيب probes_p2: الجنوبي أولاً ثم الغربي
         probes_p2 = [
-            ("S1 (pass2)", S1_START_XY, S_dir_rot, S_yaw_corr, PROBE_FORCE_THRESH_S),
-            ("S2 (pass2)", S2_START_XY, S_dir_rot, S_yaw_corr, PROBE_FORCE_THRESH_S),
             ("W1 (pass2)", W1_START_XY, W_dir_rot, W_yaw_corr, PROBE_FORCE_THRESH),
             ("W2 (pass2)", W2_START_XY, W_dir_rot, W_yaw_corr, PROBE_FORCE_THRESH),
+            ("S1 (pass2)", S1_START_XY, S_dir_rot, S_yaw_corr, PROBE_FORCE_THRESH_S),
+            ("S2 (pass2)", S2_START_XY, S_dir_rot, S_yaw_corr, PROBE_FORCE_THRESH_S),
         ]
 
         contacts = []
@@ -618,8 +738,7 @@ class BoardCalibration:
             probe_dirs.append(direction / np.linalg.norm(direction))
             delta_yaws.append(d_yaw)
 
-        # الترتيب الجديد: S1, S2, W1, W2
-        S1, S2, W1, W2 = contacts
+        W1, W2, S1, S2 = contacts
 
         # --- حساب المحاور ---
         dN = W2 - W1
@@ -658,8 +777,7 @@ class BoardCalibration:
 
         contacts_corr = [c + d * GRIPPER_TIP_OFFSET
                          for c, d in zip(contacts, offset_dirs)]
-        # نفس الترتيب: S1, S2, W1, W2
-        S1, S2, W1, W2 = contacts_corr
+        W1, W2, S1, S2 = contacts_corr
         for (name, *_rest), c_raw, c_cor, d_yaw in zip(
                 probes_p2, contacts, contacts_corr, delta_yaws):
             rospy.loginfo(f"  {name}: raw=({c_raw[0]:+.4f},{c_raw[1]:+.4f}) "
@@ -692,13 +810,13 @@ class BoardCalibration:
 
         rospy.loginfo("=" * 62)
         rospy.loginfo("Calibration complete.")
-        rospy.loginfo(f"  theta_est  (pass1, from S) = {np.degrees(theta_est):+.3f} deg")
-        rospy.loginfo(f"  theta_final(pass2)         = {np.degrees(theta_meas):+.3f} deg")
-        rospy.loginfo(f"  corner (outer, near a1)    = "
+        rospy.loginfo(f"  theta_est  (pass1)      = {np.degrees(theta_est):+.3f} deg")
+        rospy.loginfo(f"  theta_final(pass2)      = {np.degrees(theta_meas):+.3f} deg")
+        rospy.loginfo(f"  corner (outer, near a1) = "
                       f"({corner_meas[0]:+.4f}, {corner_meas[1]:+.4f}) m")
-        rospy.loginfo(f"  e_h                        = "
+        rospy.loginfo(f"  e_h                     = "
                       f"({eh_avg[0]:+.5f}, {eh_avg[1]:+.5f})")
-        rospy.loginfo(f"  e_N                        = "
+        rospy.loginfo(f"  e_N                     = "
                       f"({eN_fix[0]:+.5f}, {eN_fix[1]:+.5f})")
         rospy.loginfo("=" * 62)
 
